@@ -130,7 +130,12 @@ const GH = (function () {
   let _dbWriteQueue = Promise.resolve();
   let _dbWritePending = null;
   let _dbWriteTimer = null;
+  let _lastDbSha = null;     // shared with polling layer (declared here so syncLastSha can write it)
   const DB_DEBOUNCE_MS = 600; // batch rapid writes
+
+  // Call after every successful write so the polling layer doesn't
+  // double-fire onDbChange for our own writes.
+  function syncLastSha(sha) { if (sha) _lastDbSha = sha; }
 
   async function getDb() {
     const r = await getContents('db.json');
@@ -175,6 +180,7 @@ const GH = (function () {
             const b64 = strToB64(JSON.stringify(newDb, null, 2));
             const r = await putContents('db.json', b64, message, current.sha);
             _dbCache = { db: newDb, sha: r.content.sha };
+            syncLastSha(r.content.sha); // tell polling layer we already know about this SHA
             resolve(newDb);
             return;
           } catch (e) {
@@ -243,7 +249,7 @@ const GH = (function () {
 
   let _pollTimer = null;
   let _pollHandlers = [];
-  let _lastDbSha = null;
+  // _lastDbSha is declared in the DB operations section above so syncLastSha can write it
 
   async function pollOnce() {
     try {
