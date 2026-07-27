@@ -98,13 +98,27 @@ function escapeHtml(v) { return String(v ?? '').replace(/[&<>'"]/g, (c) => ({ '&
 function setStatus(el, text, kind = '') { if (!el) return; el.textContent = text; el.className = `status-pill ${kind}`.trim(); }
 
 // Connection quality indicator — updates the call screen badge
-function updateConnectionIndicator() {
+async function updateConnectionIndicator() {
   const badge = $('#connQuality');
   if (!badge) return;
   const peers = state.dataConnections?.size || 0;
   const calls = state.peerConnections?.size || 0;
   const hasPeer = !!state.peer;
   const hasRoom = !!state.currentRoom;
+  // Also count known peers from db.json (more accurate)
+  let dbPeerCount = 0;
+  try {
+    if (_db && hasRoom) {
+      const room = _db.rooms.find((r) => r.code === state.currentRoom?.code);
+      if (room?.peers) {
+        const now = Date.now();
+        dbPeerCount = room.peers.filter((p) => {
+          if (p.peerId === state.peerId) return false;
+          return (now - new Date(p.lastSeen || p.joinedAt).getTime()) < 90000;
+        }).length;
+      }
+    }
+  } catch {}
 
   if (!hasRoom) {
     badge.className = 'conn-badge idle';
@@ -112,15 +126,15 @@ function updateConnectionIndicator() {
   } else if (!hasPeer) {
     badge.className = 'conn-badge connecting';
     badge.innerHTML = '<span class="conn-dot pulse"></span><span>Подключение…</span>';
-  } else if (peers === 0) {
+  } else if (peers === 0 && dbPeerCount === 0) {
     badge.className = 'conn-badge waiting';
     badge.innerHTML = '<span class="conn-dot pulse"></span><span>Ожидание участников…</span>';
   } else if (calls > 0) {
     badge.className = 'conn-badge live';
-    badge.innerHTML = '<span class="conn-dot live"></span><span>В эфире · ' + peers + ' участн.</span>';
+    badge.innerHTML = '<span class="conn-dot live"></span><span>В эфире · ' + Math.max(peers, dbPeerCount) + ' участн.</span>';
   } else {
     badge.className = 'conn-badge ready';
-    badge.innerHTML = '<span class="conn-dot"></span><span>' + peers + ' участн. онлайн</span>';
+    badge.innerHTML = '<span class="conn-dot"></span><span>' + Math.max(peers, dbPeerCount) + ' участн. в комнате</span>';
   }
 }
 function isLocalOrigin() { return ['localhost', '127.0.0.1', '::1'].includes(location.hostname); }
@@ -606,16 +620,21 @@ function renderPresence() {
  * For 1-to-1 family calls, the host-join model is enough on its own.
  * ============================================================ */
 /* ============================================================
- * PeerJS — SINGLE-PEER architecture (replaces Socket.io)
+ * PeerJS — GitHub-discovery architecture (v3, reliable)
  *
- * One peer per room join. When you join a room:
- *   - Destroy any existing peer
- *   - Try to register with deterministic ID PEER_ID_PREFIX + "room-" + code
- *   - If that ID is taken (host exists), register with a random ID instead
- *   - All data connections AND media calls go through this single peer
+ * Each client:
+ *   1. Creates a peer with a RANDOM ID (no host election, no deterministic IDs)
+ *   2. On room join: writes {peerId, displayName, joinedAt} to db.json room.peers[]
+ *   3. Polls db.json every 10s (existing poll) → discovers new peers in room.peers[]
+ *   4. For each new peer: opens a data connection (full mesh)
+ *   5. On leave/logout: removes own peerId from room.peers[]
+ *   6. Media calls use the SAME peer → remote side always recognizes the caller
  *
- * This fixes the bug where calls came from a different peer ID than
- * the data connection, causing the remote side to not recognize them.
+ * This is more reliable than deterministic host IDs because:
+ *   - No dependency on a specific PeerJS ID being available
+ *   - No host election / failover complexity
+ *   - Works even if peers come and go
+ *   - Uses existing GitHub polling infrastructure for discovery
  * ============================================================ */
 function waitForPeerJS(timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
@@ -630,78 +649,158 @@ function waitForPeerJS(timeoutMs = 8000) {
 
 let _peerReady = false;
 async function ensurePeerJS() {
-  if (_peerReady) return;
+  if (_peerReady) return true;
   await waitForPeerJS().catch(() => {});
   _peerReady = (typeof Peer !== 'undefined');
   return _peerReady;
 }
 
-function setupPeerEventHandlers(peer) {
-  peer.on('open', (id) => {
-    state.peerId = id;
-    state.isRoomHost = (id === ROOM_PEER_ID(state.currentRoom?.code));
-    setStatus($('#socketStatus'), state.isRoomHost ? 'Сигналинг: хост комнаты ✓' : 'Сигналинг: подключён ✓', 'ok');
-    updateConnectionIndicator();
-    renderPresence();
-    // If we're a client (not host), connect to host now
-    if (!state.isRoomHost && state.currentRoom) {
-      connectToHost(state.currentRoom);
-    }
-  });
-  peer.on('connection', (conn) => onDataConnectionIncoming(conn));
-  peer.on('call', (call) => onMediaCallIncoming(call));
-  peer.on('error', (err) => {
-    console.warn('[peer] error', err);
-    const t = err?.type || 'error';
-    if (t === 'unavailable-id') {
-      // We tried to be host but ID is taken — destroy and re-create with random ID
-      setStatus($('#socketStatus'), 'Сигналинг: хост занят, подключаемся как клиент…', 'warn');
-      try { peer.destroy(); } catch {}
-      if (state.peer === peer) {
+// Create a peer with a random ID
+async function createMyPeer() {
+  if (state.peer) return; // already have one
+  await ensurePeerJS();
+  if (!_peerReady) {
+    setStatus($('#socketStatus'), 'Сигналинг: PeerJS не загружен', 'bad');
+    return;
+  }
+  try {
+    const peer = new Peer({ debug: 1 }); // random ID
+    state.peer = peer;
+    peer.on('open', (id) => {
+      state.peerId = id;
+      setStatus($('#socketStatus'), 'Сигналинг: подключён ✓', 'ok');
+      updateConnectionIndicator();
+      // Register self in db.json room.peers
+      registerMyPeerInRoom().catch(() => {});
+    });
+    peer.on('connection', (conn) => onDataConnectionIncoming(conn));
+    peer.on('call', (call) => onMediaCallIncoming(call));
+    peer.on('error', (err) => {
+      console.warn('[peer] error', err);
+      const t = err?.type || 'error';
+      if (t === 'peer-unavailable') {
+        // Expected when a stale peer ID is in db.json — ignore
+        // The discovery poll will not re-attempt this peer
+      } else if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') {
+        setStatus($('#socketStatus'), `Сигналинг: ошибка сети (${t}), переподключение…`, 'bad');
+        updateConnectionIndicator();
+        setTimeout(() => { try { peer.reconnect(); } catch {} }, 2000);
+      } else if (t === 'unavailable-id') {
+        // Random ID collision — extremely rare, just retry
+        setStatus($('#socketStatus'), 'Сигналинг: коллизия ID, повтор…', 'warn');
+        try { peer.destroy(); } catch {}
         state.peer = null;
         state.peerId = null;
-        // Re-create with random ID
-        setTimeout(() => createRoomPeer(state.currentRoom, false), 300);
+        setTimeout(() => createMyPeer(), 500);
+      } else {
+        setStatus($('#socketStatus'), `Сигналинг: ${err.message || t}`, 'bad');
+        updateConnectionIndicator();
       }
-    } else if (t === 'peer-unavailable') {
-      setStatus($('#socketStatus'), 'Сигналинг: удалённый пир недоступен, повтор…', 'warn');
-      // Retry connecting to host after a delay
-      if (state.currentRoom && !state.isRoomHost) {
-        setTimeout(() => connectToHost(state.currentRoom), 2000);
-      }
-    } else if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') {
-      setStatus($('#socketStatus'), `Сигналинг: ошибка сети (${t}), переподключение…`, 'bad');
+    });
+    peer.on('disconnected', () => {
+      setStatus($('#socketStatus'), 'Сигналинг: отключён, переподключение…', 'warn');
       updateConnectionIndicator();
-    } else {
-      setStatus($('#socketStatus'), `Сигналинг: ${err.message || t}`, 'bad');
-      updateConnectionIndicator();
-    }
-  });
-  peer.on('disconnected', () => {
-    setStatus($('#socketStatus'), 'Сигналинг: отключён, переподключение…', 'warn');
-    updateConnectionIndicator();
-    try { peer.reconnect(); } catch {}
-  });
+      try { peer.reconnect(); } catch {}
+    });
+  } catch (e) {
+    setStatus($('#socketStatus'), `Сигналинг: ${e.message}`, 'bad');
+  }
 }
 
-// Create a peer for the room. If tryHost=true, try to register with the
-// deterministic room ID. Otherwise use a random ID.
-function createRoomPeer(room, tryHost) {
+// Register my peer ID in the room's peer list (in db.json)
+async function registerMyPeerInRoom() {
+  if (!state.currentRoom || !state.peerId) return;
+  await ensureDb();
+  const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
   if (!room) return;
-  const peerId = tryHost ? ROOM_PEER_ID(room.code) : undefined;
-  const peer = new Peer(peerId, { debug: 1 });
-  state.peer = peer;
-  setupPeerEventHandlers(peer);
+  if (!room.peers) room.peers = [];
+  // Remove any stale entry of mine (same peerId or same userId)
+  room.peers = room.peers.filter((p) => p.peerId !== state.peerId && p.userId !== state.user.id);
+  // Add my fresh entry
+  room.peers.push({
+    peerId: state.peerId,
+    userId: state.user.id,
+    displayName: state.user.displayName || state.user.username,
+    username: state.user.username,
+    joinedAt: new Date().toISOString(),
+    lastSeen: new Date().toISOString()
+  });
+  await saveDb(_db);
 }
 
-// Client connects to host via data connection
-function connectToHost(room) {
-  if (!state.peer || !state.peerId || !room) return;
-  const hostId = ROOM_PEER_ID(room.code);
-  if (hostId === state.peerId) return; // I AM the host
+// Remove my peer ID from the room's peer list
+async function unregisterMyPeerFromRoom() {
+  if (!state.currentRoom || !state.peerId) return;
+  try {
+    await ensureDb();
+    const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
+    if (!room || !room.peers) return;
+    const before = room.peers.length;
+    room.peers = room.peers.filter((p) => p.peerId !== state.peerId);
+    if (room.peers.length !== before) await saveDb(_db);
+  } catch (e) { console.warn('unregister peer failed', e); }
+}
 
-  setStatus($('#socketStatus'), 'Сигналинг: подключение к хосту…', 'warn');
-  const conn = state.peer.connect(hostId, {
+// Update my lastSeen timestamp (called periodically)
+async function touchMyPeerInRoom() {
+  if (!state.currentRoom || !state.peerId) return;
+  try {
+    await ensureDb();
+    const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
+    if (!room || !room.peers) return;
+    const me = room.peers.find((p) => p.peerId === state.peerId);
+    if (me && (Date.now() - new Date(me.lastSeen).getTime()) > 30000) {
+      me.lastSeen = new Date().toISOString();
+      await saveDb(_db);
+    }
+  } catch (e) { /* silent */ }
+}
+
+// Called when db.json poll detects changes — discover new peers in the room
+async function discoverPeersFromDb() {
+  if (!state.currentRoom || !state.peerId || !state.peer) return;
+  // PeerJS uses .open (boolean) and .destroyed — NOT .connected
+  if (state.peer.destroyed || !state.peer.open) return;
+  await ensureDb();
+  const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
+  if (!room || !room.peers) return;
+  // Filter out stale peers (lastSeen > 90s ago)
+  const now = Date.now();
+  const livePeers = room.peers.filter((p) => {
+    if (p.peerId === state.peerId) return false; // skip self
+    const age = now - new Date(p.lastSeen || p.joinedAt).getTime();
+    return age < 90000; // 90 seconds
+  });
+  // Connect to any peer we're not already connected to
+  for (const p of livePeers) {
+    if (state.dataConnections.has(p.peerId)) continue; // already connected
+    if (state._connectingTo && state._connectingTo.has(p.peerId)) continue; // already attempting
+    connectToPeer(p.peerId, p.displayName);
+  }
+  // Update presence with all known peers (even if not yet connected)
+  renderPresenceFromDb(livePeers);
+}
+
+// Render presence using db.json peer list (more accurate than data-connections-only)
+function renderPresenceFromDb(livePeers) {
+  const me = state.user?.displayName || state.user?.username || 'Я';
+  const others = (livePeers || []).map((p) => p.displayName || 'Гость');
+  const all = [me, ...others];
+  $('#presenceBox').textContent = `Участники: ${all.join(', ') || '-'}`;
+  // Update connection badge if we have peers but no data connections yet
+  updateConnectionIndicator();
+}
+
+// Connect to a specific peer via data connection
+function connectToPeer(remotePeerId, displayName) {
+  if (!state.peer || !state.peerId || !remotePeerId) return;
+  if (remotePeerId === state.peerId) return;
+  if (state.dataConnections.has(remotePeerId)) return;
+  if (!state._connectingTo) state._connectingTo = new Set();
+  if (state._connectingTo.has(remotePeerId)) return;
+  state._connectingTo.add(remotePeerId);
+
+  const conn = state.peer.connect(remotePeerId, {
     reliable: true,
     metadata: {
       displayName: state.user.displayName || state.user.username,
@@ -710,42 +809,50 @@ function connectToHost(room) {
       peerId: state.peerId
     }
   });
+  conn._displayName = displayName || 'Гость';
+  let openTimeout = setTimeout(() => {
+    // If connection doesn't open in 8s, give up
+    state._connectingTo?.delete(remotePeerId);
+    try { conn.close(); } catch {}
+  }, 8000);
   conn.on('open', () => {
-    state.dataConnections.set(hostId, conn);
-    conn._displayName = 'Хост';
+    clearTimeout(openTimeout);
+    state._connectingTo.delete(remotePeerId);
+    state.dataConnections.set(remotePeerId, conn);
     setStatus($('#socketStatus'), 'Сигналинг: подключён к комнате ✓', 'ok');
     updateConnectionIndicator();
     renderPresence();
-    // Request presence list and chat history
-    try {
-      conn.send({ kind: 'presence-request', from: state.peerId, displayName: state.user.displayName || state.user.username });
-      conn.send({ kind: 'messages-request', from: state.peerId });
-    } catch {}
+    // Send hello so remote learns my name
+    try { conn.send({ kind: 'hello', from: state.peerId, displayName: state.user?.displayName || state.user?.username, username: state.user?.username, role: state.user?.role }); } catch {}
+    // Request chat history
+    try { conn.send({ kind: 'messages-request', from: state.peerId }); } catch {}
   });
   conn.on('data', (data) => onDataMessage(data, conn));
   conn.on('close', () => {
-    state.dataConnections.delete(hostId);
-    const call = state.peerConnections.get(hostId);
-    if (call) { try { call.close(); } catch {} state.peerConnections.delete(hostId); }
-    state.remoteStreams.delete(hostId);
+    clearTimeout(openTimeout);
+    state._connectingTo.delete(remotePeerId);
+    state.dataConnections.delete(remotePeerId);
+    const call = state.peerConnections.get(remotePeerId);
+    if (call) { try { call.close(); } catch {} state.peerConnections.delete(remotePeerId); }
+    state.remoteStreams.delete(remotePeerId);
     renderPresence();
     updateRemoteVideo();
     updateConnectionIndicator();
-    toast('Хост покинул комнату. Попытка стать новым хостом…', 'warn');
-    // Try to become the new host after a short delay
-    setTimeout(() => {
-      if (state.currentRoom && state.dataConnections.size === 0) {
-        if (state.peer) { try { state.peer.destroy(); } catch {} }
-        state.peer = null;
-        state.peerId = null;
-        createRoomPeer(state.currentRoom, true);
-      }
-    }, 800);
   });
-  conn.on('error', (e) => console.warn('[client-conn] error', e));
+  conn.on('error', (e) => {
+    clearTimeout(openTimeout);
+    state._connectingTo.delete(remotePeerId);
+    console.warn('[peer-connect] error', e);
+    // Remove from dataConnections if it was there
+    state.dataConnections.delete(remotePeerId);
+    renderPresence();
+    updateConnectionIndicator();
+  });
 }
 
 function disconnectPeer() {
+  // Unregister from db.json first (best-effort)
+  unregisterMyPeerFromRoom().catch(() => {});
   if (state.peer) { try { state.peer.destroy(); } catch {} }
   state.peer = null;
   state.peerId = null;
@@ -753,6 +860,7 @@ function disconnectPeer() {
   state.dataConnections.clear();
   state.remoteStreams.clear();
   state.isRoomHost = false;
+  if (state._connectingTo) state._connectingTo.clear();
   setStatus($('#socketStatus'), 'Сигналинг: не подключён', 'warn');
   updateConnectionIndicator();
 }
@@ -764,15 +872,19 @@ async function joinPeerRoom(room) {
     setStatus($('#socketStatus'), 'Сигналинг: PeerJS не загружен', 'bad');
     return;
   }
-
-  // Tear down any existing peer + connections
+  // Tear down any existing peer + connections (but keep the same peer if already created)
   teardownMesh();
-
   state.currentRoom = room;
   state.currentRoomCode = room.code;
-
-  // Create a fresh peer and try to become host
-  createRoomPeer(room, true);
+  // Create peer if not exists, then register in room
+  if (!state.peer) {
+    await createMyPeer();
+    // Wait for peer 'open' event (state.peerId will be set)
+    for (let i = 0; i < 50 && !state.peerId; i++) await new Promise((r) => setTimeout(r, 100));
+  }
+  await registerMyPeerInRoom();
+  // Immediately try to discover existing peers
+  discoverPeersFromDb();
 }
 
 function teardownMesh() {
@@ -781,10 +893,8 @@ function teardownMesh() {
   state.peerConnections.clear();
   state.dataConnections.clear();
   state.remoteStreams.clear();
-  if (state.peer) { try { state.peer.destroy(); } catch {} }
-  state.peer = null;
-  state.peerId = null;
-  state.isRoomHost = false;
+  if (state._connectingTo) state._connectingTo.clear();
+  // Note: we do NOT destroy state.peer here — it's reused across rooms
   $('#remoteVideo').srcObject = null;
   updateRemoteVideo();
 }
@@ -800,8 +910,7 @@ function onDataConnectionIncoming(conn) {
     // Send a hello so the other side learns my display name too
     try { conn.send({ kind: 'hello', from: state.peerId, displayName: state.user?.displayName || state.user?.username, username: state.user?.username, role: state.user?.role }); } catch {}
     renderPresence();
-    // If I'm the host, broadcast updated presence to everyone
-    if (state.isRoomHost) broadcastPresence();
+    updateConnectionIndicator();
   });
   conn.on('data', (data) => onDataMessage(data, conn));
   conn.on('close', () => {
@@ -810,8 +919,8 @@ function onDataConnectionIncoming(conn) {
     if (call) { try { call.close(); } catch {} state.peerConnections.delete(conn.peer); }
     state.remoteStreams.delete(conn.peer);
     renderPresence();
-    if (state.isRoomHost) broadcastPresence();
     updateRemoteVideo();
+    updateConnectionIndicator();
   });
   conn.on('error', (e) => console.warn('[conn-in] error', e));
 }
@@ -880,56 +989,8 @@ function onDataMessage(data, conn) {
       onHelloMessage(data, conn);
       break;
     }
-    case 'presence-request': {
-      // Sender wants to know who's in the room
-      // Reply with current peers I know about (including displayNames)
-      const peers = Array.from(state.dataConnections.entries())
-        .filter(([id]) => id !== data.from && id !== conn.peer)
-        .map(([id, c]) => ({ peerId: id, displayName: c._displayName || c.metadata?.displayName || 'Гость' }));
-      // If I'm the host, identify myself by the room peer ID (so the guest
-      // doesn't try to also connect to my "zombie" state.peer random ID).
-      // If I'm a client, identify myself by my state.peerId.
-      const myPeerId = state.isRoomHost ? (state.roomPeer?.id || state.peerId) : state.peerId;
-      peers.unshift({ peerId: myPeerId, displayName: state.user?.displayName || state.user?.username });
-      conn.send({ kind: 'presence-list', peers, from: state.peerId });
-      // If I'm the host, also tell everyone else about this new peer
-      if (state.isRoomHost) {
-        for (const [pid, c] of state.dataConnections.entries()) {
-          if (pid === conn.peer) continue;
-          try { c.send({ kind: 'peer-announce', peerId: data.from, displayName: data.displayName }); } catch {}
-        }
-      }
-      break;
-    }
-    case 'presence-list': {
-      // Host told me about other peers — connect to each
-      if (Array.isArray(data.peers)) {
-        for (const p of data.peers) {
-          const pid = typeof p === 'string' ? p : p.peerId;
-          const pname = typeof p === 'string' ? null : p.displayName;
-          if (!pid || pid === state.peerId || state.dataConnections.has(pid)) continue;
-          // Connect to this peer
-          const c = state.peer.connect(pid, { reliable: true, metadata: { displayName: state.user.displayName || state.user.username, username: state.user.username, role: state.user.role, peerId: state.peerId } });
-          if (pname) c._displayName = pname;
-          c.on('open', () => { state.dataConnections.set(pid, c); renderPresence(); });
-          c.on('data', (d) => onDataMessage(d, c));
-          c.on('close', () => { state.dataConnections.delete(pid); renderPresence(); });
-          c.on('error', (e) => console.warn('[peer-connect] error', e));
-        }
-      }
-      break;
-    }
-    case 'peer-announce': {
-      // Host told me a new peer joined — connect to them
-      if (data.peerId && data.peerId !== state.peerId && !state.dataConnections.has(data.peerId)) {
-        const c = state.peer.connect(data.peerId, { reliable: true, metadata: { displayName: state.user.displayName || state.user.username, username: state.user.username, role: state.user.role, peerId: state.peerId } });
-        c.on('open', () => { state.dataConnections.set(data.peerId, c); renderPresence(); });
-        c.on('data', (d) => onDataMessage(d, c));
-        c.on('close', () => { state.dataConnections.delete(data.peerId); renderPresence(); });
-        c.on('error', (e) => console.warn('[peer-announce-connect] error', e));
-      }
-      break;
-    }
+    // presence-request / presence-list / peer-announce are no longer used —
+    // peer discovery is now done via GitHub db.json polling (discoverPeersFromDb)
     case 'chat-message': {
       // Incoming chat message from a peer
       (async () => {
@@ -993,15 +1054,6 @@ function onHelloMessage(data, conn) {
     renderPresence();
   }
 }
-function broadcastPresence() {
-  if (!state.isRoomHost) return;
-  const peers = Array.from(state.dataConnections.keys());
-  for (const [pid, c] of state.dataConnections.entries()) {
-    try { c.send({ kind: 'presence-list', peers: peers.filter((p) => p !== pid), from: state.peerId }); } catch {}
-  }
-  renderPresence();
-  updateConnectionIndicator();
-}
 
 /* ============================================================
  * Local media & call controls
@@ -1045,7 +1097,33 @@ async function ensureLocalMedia(video = true) {
 async function startCall() {
   if (!state.currentRoom) return toast('Сначала выберите комнату.', 'warn');
   if (!state.peer) return toast('Сигналинг не подключён.', 'bad');
-  if (state.dataConnections.size === 0) return toast('В комнате пока нет других участников. Подождите гостя или поделитесь ссылкой.', 'warn');
+  // Try to discover peers first (in case poll hasn't fired yet)
+  await discoverPeersFromDb();
+  // Wait a moment for any pending connections to open
+  if (state.dataConnections.size === 0) {
+    // Check db.json for any known peers we haven't connected to yet
+    await ensureDb();
+    const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
+    const livePeers = (room?.peers || []).filter((p) => {
+      if (p.peerId === state.peerId) return false;
+      const age = Date.now() - new Date(p.lastSeen || p.joinedAt).getTime();
+      return age < 90000;
+    });
+    if (livePeers.length === 0) {
+      return toast('В комнате пока нет других участников. Подождите гостя или поделитесь ссылкой.', 'warn');
+    }
+    // We know peers exist but aren't connected yet — try to connect now
+    for (const p of livePeers) {
+      if (!state.dataConnections.has(p.peerId)) connectToPeer(p.peerId, p.displayName);
+    }
+    // Wait up to 5s for connections to open
+    for (let i = 0; i < 25 && state.dataConnections.size === 0; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (state.dataConnections.size === 0) {
+      return toast('Не удалось подключиться к участникам. Попробуйте ещё раз через несколько секунд.', 'warn');
+    }
+  }
   await ensureLocalMedia(true).catch(async (e) => {
     toast(`${e.message} Пробую только микрофон.`, 'warn');
     return ensureLocalMedia(false);
@@ -1773,6 +1851,14 @@ function bind() {
   bindClick('#muteBtn', toggleMute);
   bindClick('#cameraBtn', () => toggleCamera().catch((e) => toast(e.message, 'bad')));
   bindClick('#checkConnectionBtn', checkConnection);
+  bindClick('#refreshPeersBtn', async () => {
+    toast('Поиск участников…', 'info');
+    await discoverPeersFromDb();
+    await touchMyPeerInRoom();
+    await updateConnectionIndicator();
+    const n = state.dataConnections.size;
+    toast(n ? `Подключено к ${n} участникам.` : 'Участники не найдены. Подождите или поделитесь ссылкой.', n ? 'ok' : 'warn');
+  });
   bindClick('#sendChatBtn', sendMessage);
   bindClick('#refreshChatBtn', refreshMessages);
   $('#chatInput')?.addEventListener('keydown', (e) => { if (e.ctrlKey && e.key === 'Enter') sendMessage(); });
@@ -1817,22 +1903,33 @@ async function init() {
   await checkHealth();
   await seedDefaultUsers();
   await loadMe();
-  // Start polling GitHub for db.json changes every 10s (chat / rooms / files sync)
+  // Start polling GitHub for db.json changes every 10s (chat / rooms / files / peer discovery)
   GH.startPolling(10000);
   GH.onDbChange((newDb) => {
     // Update local cache + re-render relevant UI
     _db = newDb;
     if (state.user) {
-      // Don't refresh if user is mid-action (e.g. typing in chat) — only refresh lists
       try { refreshRooms(); } catch {}
       try { refreshMessages(); } catch {}
       try { refreshMail(); } catch {}
       try { refreshFiles(); } catch {}
       try { if (state.user.role === 'admin') refreshUsers(); } catch {}
+      // Discover new peers in the room (GitHub-based peer discovery)
+      try { discoverPeersFromDb(); } catch (e) { console.warn('discoverPeers', e); }
     }
   });
   // Periodic health check (rate limit display)
   setInterval(checkHealth, 60000);
+  // Keep my peer entry fresh in db.json every 30s (so others don't filter me out as stale)
+  setInterval(() => { touchMyPeerInRoom().catch(() => {}); }, 30000);
+  // Unregister my peer on page close / navigate away
+  window.addEventListener('beforeunload', () => {
+    // Use sendBeacon-style best-effort: fire and forget
+    unregisterMyPeerFromRoom().catch(() => {});
+  });
+  window.addEventListener('pagehide', () => {
+    unregisterMyPeerFromRoom().catch(() => {});
+  });
   // Show invite hint on login screen if there's a room in URL
   const params = new URLSearchParams(location.search);
   if (params.get('room')) {
