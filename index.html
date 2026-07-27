@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#020617" />
+  <title>Семейная связь</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="styles.css?v=20260727-ghp1" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
+  <script src="app.js?v=20260727-ghp1" defer></script>
+</head>
+<body class="auth-only">
+  <noscript>Для работы приложения нужен JavaScript.</noscript>
+
+  <section id="loginCard" class="login-lander" aria-label="Вход">
+    <div class="login-bg"></div>
+    <div class="login-panel">
+      <div class="brand-block">
+        <div class="brand-mark">FC</div>
+        <div>
+          <div class="eyebrow">GitHub Pages /call</div>
+          <h1>Семейная связь</h1>
+        </div>
+      </div>
+      <p class="login-copy">Один приватный семейный вход: видео‑звонок, чат, видео/аудио почта и файлы. Статичная версия работает прямо в браузере без сервера.</p>
+      <div id="inviteLoginHint" class="invite-login-hint hidden">
+        <strong>Приглашение найдено.</strong>
+        <span>После входа вы автоматически попадёте в комнату звонка.</span>
+      </div>
+      <div class="login-form">
+        <label>Логин
+          <input id="loginUser" autocomplete="username" value="admin" />
+        </label>
+        <label>Пароль
+          <input id="loginPass" type="password" autocomplete="current-password" value="admin" />
+        </label>
+        <button id="loginBtn" class="primary full"><span data-icon="right-to-bracket"></span><span>Войти</span></button>
+        <p class="hint">Первый экран всегда только вход. Первый вход: <b>admin/admin</b>. После входа смените пароль в админке.</p>
+      </div>
+      <div class="login-pills">
+        <span class="mini-pill">HTTPS</span>
+        <span class="mini-pill">mobile UX</span>
+        <span class="mini-pill">private storage</span>
+      </div>
+    </div>
+  </section>
+
+  <div id="appScreen" class="mobile-app hidden">
+    <section id="calls" class="tab-panel call-page active">
+      <div id="callStage" class="call-stage">
+        <div class="remote-stage">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <div class="remote-empty">
+            <div class="avatar-ring">F</div>
+            <h2>Семейный звонок</h2>
+            <p id="callSubline">Выберите комнату или откройте invite‑ссылку.</p>
+          </div>
+        </div>
+
+        <div class="call-topbar">
+          <button id="openRoomsBtn" class="round-glass icon-action" data-tip="Комнаты" title="Комнаты" aria-label="Комнаты"><span data-icon="video"></span></button>
+          <div class="call-room-title">
+            <strong id="currentRoomTitle">Комната не выбрана</strong>
+            <span id="currentRoomCode">-</span>
+          </div>
+        </div>
+
+        <div class="local-tile">
+          <video id="localVideo" autoplay playsinline muted></video>
+          <span>Вы</span>
+        </div>
+
+        <div class="call-controls overlay-controls">
+          <button id="startVideoBtn" class="call-action circle-control" data-tip="Камера"><span data-icon="video"></span><span>Камера</span></button>
+          <button id="startAudioBtn" class="call-action circle-control" data-tip="Микрофон"><span data-icon="microphone"></span><span>Только микрофон</span></button>
+          <button id="callBtn" class="call-action circle-control primary-control" data-tip="Позвонить"><span data-icon="phone"></span><span>Позвонить</span></button>
+          <button id="muteBtn" class="call-action circle-control" data-tip="Mute"><span data-icon="microphone"></span><span>Микрофон</span></button>
+          <button id="cameraBtn" class="call-action circle-control" data-tip="Видео"><span data-icon="video"></span><span>Видео</span></button>
+          <button id="hangupBtn" class="call-action circle-control end-control" data-tip="Завершить"><span data-icon="phone-slash"></span><span>Завершить</span></button>
+        </div>
+        <button id="showUiBtn" class="show-ui hidden">Показать управление</button>
+      </div>
+
+      <div id="roomsDrawer" class="bottom-drawer" aria-label="Комнаты">
+        <div class="drawer-handle"></div>
+        <div class="drawer-head">
+          <div>
+            <div class="eyebrow">Комнаты</div>
+            <h3>Выберите или создайте комнату</h3>
+          </div>
+          <button id="closeRoomsBtn" class="ghost small icon-action" data-tip="Закрыть" title="Закрыть" aria-label="Закрыть"><span data-icon="xmark"></span></button>
+        </div>
+        <div class="room-create-card">
+          <input id="roomTitle" placeholder="Название комнаты" value="Семейный звонок" />
+          <button id="createRoomBtn" class="primary icon-action" data-tip="Создать" title="Создать" aria-label="Создать"><span data-icon="plus"></span></button>
+          <button id="newRoomBtn" class="ghost compact icon-action" data-tip="Новое имя" title="Новое имя" aria-label="Новое имя"><span data-icon="plus"></span></button>
+        </div>
+        <div class="active-invite-card">
+          <div class="room-current">
+            <strong id="currentRoomTitleMirror">Комната не выбрана</strong>
+            <span id="currentRoomCodeMirror">-</span>
+          </div>
+          <div class="invite-row">
+            <input id="inviteLink" readonly placeholder="Ссылка появится после выбора комнаты" />
+            <button id="copyInviteBtn" class="ghost icon-action" data-tip="Копировать" title="Копировать" aria-label="Копировать"><span data-icon="copy"></span></button>
+          </div>
+          <button id="leaveRoomBtn" class="ghost danger-soft icon-action" data-tip="Выйти" title="Выйти" aria-label="Выйти"><span data-icon="right-from-bracket"></span></button>
+          <div id="presenceBox" class="presence">Участники: -</div>
+        </div>
+        <div class="join-code-card">
+          <div class="eyebrow">Войти в существующую комнату</div>
+          <input id="joinRoomCode" placeholder="Код комнаты" autocomplete="off" />
+          <input id="joinRoomToken" placeholder="Invite token, если есть" autocomplete="off" />
+          <button id="joinRoomByCodeBtn" class="ghost icon-action" data-tip="Войти по коду" title="Войти по коду" aria-label="Войти по коду"><span data-icon="right-to-bracket"></span></button>
+        </div>
+        <div id="roomsList" class="list empty">Нет комнат.</div>
+        <div class="connection-card">
+          <span id="iceState">ICE: нет данных</span>
+          <span id="pcState">PC: нет данных</span>
+          <button id="checkConnectionBtn" class="ghost small icon-action" data-tip="Проверить соединение" title="Проверить соединение" aria-label="Проверить соединение"><span data-icon="signal"></span></button>
+        </div>
+      </div>
+    </section>
+
+    <section id="chat" class="tab-panel content-page">
+      <div class="content-head">
+        <div><div class="eyebrow">Семейный чат</div><h2>Чат</h2></div>
+        <button class="round-glass menu-open" title="Меню"><span data-icon="bars"></span></button>
+      </div>
+      <article class="glass-card chat-card">
+        <div class="section-tools"><button id="refreshChatBtn" class="ghost small icon-action" data-tip="Обновить" title="Обновить" aria-label="Обновить"><span data-icon="rotate"></span></button></div>
+        <div id="messagesList" class="messages"></div>
+        <div class="composer">
+          <textarea id="chatInput" rows="3" placeholder="Напишите сообщение..."></textarea>
+          <button id="sendChatBtn" class="primary icon-action" data-tip="Отправить" title="Отправить" aria-label="Отправить"><span data-icon="paper-plane"></span></button>
+        </div>
+      </article>
+    </section>
+
+    <section id="mail" class="tab-panel content-page">
+      <div class="content-head">
+        <div><div class="eyebrow">Видео/аудио</div><h2>Почта</h2></div>
+        <button class="round-glass menu-open" title="Меню"><span data-icon="bars"></span></button>
+      </div>
+      <article class="glass-card recorder-card">
+        <div class="card-head"><h3>Записать сообщение</h3><span id="recordTimer" class="timer">00:00</span></div>
+        <input id="recordModeAudio" class="visually-hidden" type="radio" name="recordMode" value="audio" checked />
+        <input id="recordModeVideo" class="visually-hidden" type="radio" name="recordMode" value="video" />
+        <div class="record-mode icon-segment" role="radiogroup" aria-label="Режим записи">
+          <button type="button" class="icon-action record-mode-btn active" data-mode="audio" data-tip="Аудио" aria-label="Аудио" title="Аудио"><span data-icon="microphone"></span></button>
+          <button type="button" class="icon-action record-mode-btn" data-mode="video" data-tip="Видео" aria-label="Видео" title="Видео"><span data-icon="video"></span></button>
+        </div>
+        <textarea id="mailNote" rows="3" placeholder="Короткая подпись к сообщению..."></textarea>
+        <div class="action-row">
+          <button id="startRecordBtn" class="primary icon-action" data-tip="Записать" title="Записать" aria-label="Записать"><span data-icon="record-vinyl"></span></button>
+          <button id="stopRecordBtn" class="danger icon-action" data-tip="Остановить" title="Остановить" aria-label="Остановить" disabled><span data-icon="square"></span></button>
+        </div>
+        <video id="recordPreview" class="record-preview hidden" controls playsinline></video>
+      </article>
+      <article class="glass-card media-card">
+        <div class="card-head"><h3>Сохранённые сообщения</h3><button id="refreshMailBtn" class="ghost small icon-action" data-tip="Обновить" title="Обновить" aria-label="Обновить"><span data-icon="rotate"></span></button></div>
+        <div id="mailList" class="media-list empty">Нет сообщений.</div>
+      </article>
+    </section>
+
+    <section id="files" class="tab-panel content-page">
+      <div class="content-head">
+        <div><div class="eyebrow">Локальное хранилище</div><h2>Файлы</h2></div>
+        <button class="round-glass menu-open" title="Меню"><span data-icon="bars"></span></button>
+      </div>
+      <article class="glass-card upload-card">
+        <div class="card-head"><h3>Загрузить</h3><span id="uploadLimit" class="badge">...</span></div>
+        <label class="file-picker" for="fileInput">
+          <input id="fileInput" type="file" multiple />
+          <span class="file-picker-icon"><span data-icon="cloud-arrow-up"></span></span>
+          <span><strong>Выбрать файлы</strong><small id="filePickerText">MOV, MPG, MP4, PDF, фото, аудио, текст</small></span>
+        </label>
+        <textarea id="fileNote" rows="3" placeholder="Описание файла..."></textarea>
+        <button id="uploadFilesBtn" class="primary icon-action" data-tip="Загрузить" title="Загрузить" aria-label="Загрузить"><span data-icon="upload"></span></button>
+      </article>
+      <article class="glass-card storage-card">
+        <div class="card-head"><h3>Библиотека</h3><button id="refreshFilesBtn" class="ghost small icon-action" data-tip="Обновить" title="Обновить" aria-label="Обновить"><span data-icon="rotate"></span></button></div>
+        <div id="filesList" class="media-list empty">Нет файлов.</div>
+      </article>
+    </section>
+
+    <section id="admin" class="tab-panel content-page">
+      <div class="content-head">
+        <div><div class="eyebrow">Управление</div><h2>Админ</h2></div>
+        <button class="round-glass menu-open" title="Меню"><span data-icon="bars"></span></button>
+      </div>
+      <article class="glass-card admin-card">
+        <h3>Новый пользователь</h3>
+        <div class="admin-form">
+          <input id="newUserName" placeholder="login" />
+          <input id="newDisplayName" placeholder="Имя на экране" />
+          <input id="newPassword" type="password" placeholder="пароль" />
+          <select id="newRole"><option value="guest">guest</option><option value="admin">admin</option></select>
+          <button id="addUserBtn" class="primary icon-action" data-tip="Добавить" title="Добавить" aria-label="Добавить"><span data-icon="user-plus"></span></button>
+        </div>
+      </article>
+      <article class="glass-card admin-card">
+        <div class="card-head"><h3>Пользователи</h3><button id="refreshUsersBtn" class="ghost small icon-action" data-tip="Обновить" title="Обновить" aria-label="Обновить"><span data-icon="rotate"></span></button></div>
+        <div id="usersList" class="list empty">Нет данных.</div>
+      </article>
+      <article class="glass-card admin-card">
+        <div class="card-head"><h3>Опасная зона</h3></div>
+        <button id="resetAllBtn" class="ghost danger-soft"><span data-icon="trash"></span><span>Сбросить все локальные данные</span></button>
+        <p class="hint" style="margin-top:8px">Удалит пользователей, комнаты, сообщения и загруженные файлы из этого браузера.</p>
+      </article>
+    </section>
+
+    <div id="appMenu" class="menu-drawer">
+      <div class="drawer-handle"></div>
+      <div class="drawer-head"><h3>Разделы</h3><button id="closeMenuBtn" class="ghost small"><span data-icon="xmark"></span><span>Закрыть</span></button></div>
+      <div class="menu-grid">
+        <button class="tab menu-tile active" data-tab="calls"><span data-icon="video"></span><strong>Звонок</strong><small>комнаты и видео</small></button>
+        <button class="tab menu-tile" data-tab="chat"><span data-icon="comment"></span><strong>Чат</strong><small>сообщения</small></button>
+        <button class="tab menu-tile" data-tab="mail"><span data-icon="microphone"></span><strong>Почта</strong><small>audio/video</small></button>
+        <button class="tab menu-tile" data-tab="files"><span data-icon="folder"></span><strong>Файлы</strong><small>upload/replay/dl</small></button>
+        <button class="tab menu-tile admin-only hidden" data-tab="admin"><span data-icon="user-gear"></span><strong>Админ</strong><small>users/pass</small></button>
+      </div>
+      <div id="userCard" class="user-card hidden">
+        <div><div class="eyebrow">Вы вошли как</div><strong id="userName">-</strong></div>
+        <button id="logoutBtn" class="ghost icon-action" data-tip="Выйти" title="Выйти" aria-label="Выйти"><span data-icon="right-from-bracket"></span></button>
+      </div>
+      <div class="status-stack">
+        <div class="status-pill" id="apiStatus">API: проверка...</div>
+        <div class="status-pill" id="socketStatus">Сигналинг: не подключён</div>
+        <div class="status-pill" id="peerStatus">WebRTC: нет соединения</div>
+        <div class="status-pill" id="browserStatus">Браузер: проверка...</div>
+      </div>
+      <div class="menu-actions">
+        <button id="refreshAllBtn" class="ghost icon-action" data-tip="Обновить всё" title="Обновить всё" aria-label="Обновить всё"><span data-icon="rotate"></span></button>
+        <button id="installBtn" class="ghost hidden icon-action" data-tip="Установить PWA" title="Установить PWA" aria-label="Установить PWA"><span data-icon="download"></span></button>
+      </div>
+    </div>
+    <div id="menuBackdrop" class="drawer-backdrop"></div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <dialog id="previewDialog" class="preview-dialog">
+    <div class="dialog-head">
+      <strong id="previewTitle">Просмотр</strong>
+      <button id="closePreviewBtn" class="ghost icon-action" data-tip="Закрыть" title="Закрыть" aria-label="Закрыть"><span data-icon="xmark"></span></button>
+    </div>
+    <div id="previewBody" class="preview-body"></div>
+    <div class="dialog-actions">
+      <a id="previewDownload" class="button icon-action" href="#" download data-tip="Скачать оригинал" title="Скачать оригинал" aria-label="Скачать оригинал"><span data-icon="download"></span></a>
+    </div>
+  </dialog>
+</body>
+</html>
