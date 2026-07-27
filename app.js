@@ -867,12 +867,11 @@ function onDataMessage(data, conn) {
       const peers = Array.from(state.dataConnections.entries())
         .filter(([id]) => id !== data.from && id !== conn.peer)
         .map(([id, c]) => ({ peerId: id, displayName: c._displayName || c.metadata?.displayName || 'Гость' }));
-      // Include myself in the response so the requester learns my name
-      peers.unshift({ peerId: state.peerId, displayName: state.user?.displayName || state.user?.username });
-      // If I'm the host, also include my room peer identity
-      if (state.isRoomHost && state.roomPeer?.id) {
-        peers.unshift({ peerId: state.roomPeer.id, displayName: state.user?.displayName || state.user?.username, isHost: true });
-      }
+      // If I'm the host, identify myself by the room peer ID (so the guest
+      // doesn't try to also connect to my "zombie" state.peer random ID).
+      // If I'm a client, identify myself by my state.peerId.
+      const myPeerId = state.isRoomHost ? (state.roomPeer?.id || state.peerId) : state.peerId;
+      peers.unshift({ peerId: myPeerId, displayName: state.user?.displayName || state.user?.username });
       conn.send({ kind: 'presence-list', peers, from: state.peerId });
       // If I'm the host, also tell everyone else about this new peer
       if (state.isRoomHost) {
