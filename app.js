@@ -43,7 +43,11 @@ const ROOM_PEER_ID = (code) => `${PEER_ID_PREFIX}room-${code.toLowerCase()}`;
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:global.stun.twilio.com:3478' }
+  { urls: 'stun:global.stun.twilio.com:3478' },
+  // Free TURN servers from OpenRelay (for NAT traversal on mobile networks)
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelay', credential: 'openrelay' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelay', credential: 'openrelay' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelay', credential: 'openrelay' }
 ];
 
 /* ---------- IndexedDB shim removed — all media now lives in GitHub repo ---------- */
@@ -668,7 +672,7 @@ async function createMyPeer() {
     return;
   }
   try {
-    const peer = new Peer({ debug: 1 }); // random ID
+    const peer = new Peer({ debug: 1, config: { iceServers: ICE_SERVERS } }); // random ID, with TURN servers for NAT traversal
     state.peer = peer;
     peer.on('open', (id) => {
       state.peerId = id;
@@ -1103,9 +1107,7 @@ async function startCall() {
   if (!state.peer) return toast('Сигналинг не подключён.', 'bad');
   // Try to discover peers first (in case poll hasn't fired yet)
   await discoverPeersFromDb();
-  // Wait a moment for any pending connections to open
   if (state.dataConnections.size === 0) {
-    // Check db.json for any known peers we haven't connected to yet
     await ensureDb();
     const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
     const livePeers = (room?.peers || []).filter((p) => {
@@ -1114,38 +1116,50 @@ async function startCall() {
       return age < 90000;
     });
     if (livePeers.length === 0) {
-      return toast('В комнате пока нет других участников. Подождите гостя или поделитесь ссылкой.', 'warn');
+      return toast('В комнате нет других участников. Поделитесь ссылкой-приглашением.', 'warn');
     }
-    // We know peers exist but aren't connected yet — try to connect now
     for (const p of livePeers) {
       if (!state.dataConnections.has(p.peerId)) connectToPeer(p.peerId, p.displayName);
     }
-    // Wait up to 5s for connections to open
     for (let i = 0; i < 25 && state.dataConnections.size === 0; i++) {
       await new Promise((r) => setTimeout(r, 200));
     }
     if (state.dataConnections.size === 0) {
-      return toast('Не удалось подключиться к участникам. Попробуйте ещё раз через несколько секунд.', 'warn');
+      return toast('Не удалось подключиться. Нажмите кнопку обновления в меню комнат и попробуйте снова.', 'warn');
     }
   }
   await ensureLocalMedia(true).catch(async (e) => {
     toast(`${e.message} Пробую только микрофон.`, 'warn');
     return ensureLocalMedia(false);
   });
-  if (!state.localStream) return toast('Нет локального медиа.', 'bad');
-  // Call every connected peer
+  if (!state.localStream) return toast('Нет доступа к камере/микрофону.', 'bad');
+  // Call every connected peer, with retry
   let initiated = 0;
   for (const pid of state.dataConnections.keys()) {
     if (state.peerConnections.has(pid)) continue;
-    try {
-      const call = state.peer.call(pid, state.localStream, { metadata: { displayName: state.user.displayName || state.user.username } });
-      attachCallHandlers(call);
-      initiated++;
-    } catch (e) {
-      toast(`Звонок: ${e.message}`, 'bad');
+    let success = false;
+    for (let attempt = 0; attempt < 3 && !success; attempt++) {
+      try {
+        const call = state.peer.call(pid, state.localStream, { metadata: { displayName: state.user.displayName || state.user.username } });
+        attachCallHandlers(call);
+        success = true;
+        initiated++;
+      } catch (e) {
+        console.warn(`[call] attempt ${attempt + 1} failed`, e);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+      }
     }
+    if (!success) toast(`Не удалось дозвониться до участника. Попробуйте ещё раз.`, 'bad');
   }
-  toast(initiated ? `Звонок инициализирован (${initiated}).` : 'Не удалось позвонить.', initiated ? 'ok' : 'warn');
+  if (initiated) {
+    toast('Звонок отправлен. Ожидание ответа…', 'ok');
+    // Check if call actually connected within 10s
+    setTimeout(() => {
+      if (state.peerConnections.size > 0 && state.remoteStreams.size === 0) {
+        toast('Соединение не установлено. Проверьте, что оба устройства в одной комнате.', 'warn');
+      }
+    }, 10000);
+  }
 }
 
 function hangup(notify = true) {
