@@ -96,6 +96,33 @@ function fmtTime(iso) { if (!iso) return ''; try { return new Intl.DateTimeForma
 function fmtBytes(b) { const n = Number(b || 0); if (n < 1024) return `${n} B`; if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`; if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`; return `${(n / 1073741824).toFixed(2)} GB`; }
 function escapeHtml(v) { return String(v ?? '').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c])); }
 function setStatus(el, text, kind = '') { if (!el) return; el.textContent = text; el.className = `status-pill ${kind}`.trim(); }
+
+// Connection quality indicator — updates the call screen badge
+function updateConnectionIndicator() {
+  const badge = $('#connQuality');
+  if (!badge) return;
+  const peers = state.dataConnections?.size || 0;
+  const calls = state.peerConnections?.size || 0;
+  const hasPeer = !!state.peer;
+  const hasRoom = !!state.currentRoom;
+
+  if (!hasRoom) {
+    badge.className = 'conn-badge idle';
+    badge.innerHTML = '<span class="conn-dot"></span><span>Нет комнаты</span>';
+  } else if (!hasPeer) {
+    badge.className = 'conn-badge connecting';
+    badge.innerHTML = '<span class="conn-dot pulse"></span><span>Подключение…</span>';
+  } else if (peers === 0) {
+    badge.className = 'conn-badge waiting';
+    badge.innerHTML = '<span class="conn-dot pulse"></span><span>Ожидание участников…</span>';
+  } else if (calls > 0) {
+    badge.className = 'conn-badge live';
+    badge.innerHTML = '<span class="conn-dot live"></span><span>В эфире · ' + peers + ' участн.</span>';
+  } else {
+    badge.className = 'conn-badge ready';
+    badge.innerHTML = '<span class="conn-dot"></span><span>' + peers + ' участн. онлайн</span>';
+  }
+}
 function isLocalOrigin() { return ['localhost', '127.0.0.1', '::1'].includes(location.hostname); }
 function randomId(prefix = '') { return `${prefix}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
 function randomCode() {
@@ -297,7 +324,6 @@ async function login() {
   requireLoginUi();
   toast('Вход выполнен.', 'ok');
   await refreshAll();
-  connectPeer();
   const joinedFromInvite = await autoJoinFromUrl();
   maybeOpenRoomChooser(joinedFromInvite);
 }
@@ -317,7 +343,6 @@ async function loadMe() {
   if (!u) { clearSession(); state.user = null; requireLoginUi(); return; }
   state.user = { id: u.id, username: u.username, displayName: u.displayName, role: u.role };
   requireLoginUi();
-  connectPeer();
   await refreshAll();
   const joinedFromInvite = await autoJoinFromUrl();
   maybeOpenRoomChooser(joinedFromInvite);
@@ -343,7 +368,13 @@ function enforceClosedDrawers() { $('#appMenu')?.classList.remove('open'); $('#r
 function enforceSingleActivePanel(name = 'calls') { $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name)); $$('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === name)); }
 function openMenu() { $('#roomsDrawer')?.classList.remove('open'); $('#appMenu')?.classList.add('open'); $('#menuBackdrop')?.classList.add('open'); }
 function openRooms() { $('#appMenu')?.classList.remove('open'); $('#roomsDrawer')?.classList.add('open'); $('#menuBackdrop')?.classList.add('open'); }
-function tab(name) { $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name)); $$('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === name)); closeDrawers(); }
+function tab(name) {
+  $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  $$('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === name));
+  closeDrawers();
+  // Lazy-render stats when the stats tab is opened
+  if (name === 'stats') { refreshStats().catch(() => {}); }
+}
 
 /* ============================================================
  * Health check (static — always ok unless storage unavailable)
@@ -436,6 +467,7 @@ async function selectRoom(id, inviteToken = null) {
   await joinPeerRoom(room);
   renderRooms();
   renderPresence();
+  updateConnectionIndicator();
 }
 function makeInviteUrl(code, token) {
   const base = `${location.origin}${location.pathname.replace(/\/index\.html$/, '/')}`;
@@ -505,6 +537,7 @@ function leaveRoom() {
   $('#inviteLink').value = '';
   $('#presenceBox').textContent = 'Участники: -';
   renderRooms();
+  updateConnectionIndicator();
 }
 function maybeOpenRoomChooser(joinedFromInvite = false) {
   if (!state.user || joinedFromInvite) return;
@@ -572,6 +605,18 @@ function renderPresence() {
  *
  * For 1-to-1 family calls, the host-join model is enough on its own.
  * ============================================================ */
+/* ============================================================
+ * PeerJS — SINGLE-PEER architecture (replaces Socket.io)
+ *
+ * One peer per room join. When you join a room:
+ *   - Destroy any existing peer
+ *   - Try to register with deterministic ID PEER_ID_PREFIX + "room-" + code
+ *   - If that ID is taken (host exists), register with a random ID instead
+ *   - All data connections AND media calls go through this single peer
+ *
+ * This fixes the bug where calls came from a different peer ID than
+ * the data connection, causing the remote side to not recognize them.
+ * ============================================================ */
 function waitForPeerJS(timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -583,116 +628,79 @@ function waitForPeerJS(timeoutMs = 8000) {
   });
 }
 
-async function connectPeer() {
-  if (!state.user) return;
-  if (state.peer) return; // already connected at the global identity
-  await waitForPeerJS().catch((e) => toast(e.message, 'bad'));
-  if (typeof Peer === 'undefined') {
-    setStatus($('#socketStatus'), 'Сигналинг: PeerJS не загружен', 'bad');
-    return;
-  }
-  // Global identity (NOT joined to any specific room yet). We use a random ID
-  // so multiple tabs / devices on the same account don't collide.
-  try {
-    const peer = new Peer({ debug: 1 });
-    state.peer = peer;
-    peer.on('open', (id) => {
-      state.peerId = id;
-      setStatus($('#socketStatus'), 'Сигналинг: подключён', 'ok');
-      // If user was mid-join when peer opened, finish it now
-      if (state.pendingJoin) {
-        const { code, inviteToken } = state.pendingJoin;
-        state.pendingJoin = null;
-        joinPeerRoom({ code, inviteToken, id: state.pendingJoinId, title: state.pendingJoinTitle });
-      }
-    });
-    peer.on('error', (err) => {
-      console.warn('[peer] error', err);
-      const t = err?.type || 'error';
-      if (t === 'unavailable-id') {
-        // ID taken — try again with a fresh random ID (host collision)
-        setStatus($('#socketStatus'), 'Сигналинг: ID занят, пробую снова…', 'warn');
-        if (state.peer === peer) { try { peer.destroy(); } catch {} state.peer = null; setTimeout(() => connectPeer(), 400); }
-      } else if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') {
-        setStatus($('#socketStatus'), `Сигналинг: ошибка сети (${t})`, 'bad');
-      } else if (t === 'peer-unavailable') {
-        // Handled at call-site
-        setStatus($('#socketStatus'), `Сигналинг: удалённый пир недоступен`, 'warn');
-      } else {
-        setStatus($('#socketStatus'), `Сигналинг: ${err.message || t}`, 'bad');
-      }
-    });
-    peer.on('disconnected', () => {
-      setStatus($('#socketStatus'), 'Сигналинг: отключён, переподключаю…', 'warn');
-      try { peer.reconnect(); } catch {}
-    });
-    peer.on('connection', (conn) => onDataConnectionIncoming(conn));
-    peer.on('call', (call) => onMediaCallIncoming(call));
-  } catch (e) {
-    setStatus($('#socketStatus'), `Сигналинг: ${e.message}`, 'bad');
-  }
+let _peerReady = false;
+async function ensurePeerJS() {
+  if (_peerReady) return;
+  await waitForPeerJS().catch(() => {});
+  _peerReady = (typeof Peer !== 'undefined');
+  return _peerReady;
 }
 
-function disconnectPeer() {
-  if (state.peer) { try { state.peer.destroy(); } catch {} }
-  state.peer = null;
-  state.peerId = null;
-  state.peerConnections.clear();
-  state.dataConnections.clear();
-  state.remoteStreams.clear();
-  setStatus($('#socketStatus'), 'Сигналинг: не подключён', 'warn');
+function setupPeerEventHandlers(peer) {
+  peer.on('open', (id) => {
+    state.peerId = id;
+    state.isRoomHost = (id === ROOM_PEER_ID(state.currentRoom?.code));
+    setStatus($('#socketStatus'), state.isRoomHost ? 'Сигналинг: хост комнаты ✓' : 'Сигналинг: подключён ✓', 'ok');
+    updateConnectionIndicator();
+    renderPresence();
+    // If we're a client (not host), connect to host now
+    if (!state.isRoomHost && state.currentRoom) {
+      connectToHost(state.currentRoom);
+    }
+  });
+  peer.on('connection', (conn) => onDataConnectionIncoming(conn));
+  peer.on('call', (call) => onMediaCallIncoming(call));
+  peer.on('error', (err) => {
+    console.warn('[peer] error', err);
+    const t = err?.type || 'error';
+    if (t === 'unavailable-id') {
+      // We tried to be host but ID is taken — destroy and re-create with random ID
+      setStatus($('#socketStatus'), 'Сигналинг: хост занят, подключаемся как клиент…', 'warn');
+      try { peer.destroy(); } catch {}
+      if (state.peer === peer) {
+        state.peer = null;
+        state.peerId = null;
+        // Re-create with random ID
+        setTimeout(() => createRoomPeer(state.currentRoom, false), 300);
+      }
+    } else if (t === 'peer-unavailable') {
+      setStatus($('#socketStatus'), 'Сигналинг: удалённый пир недоступен, повтор…', 'warn');
+      // Retry connecting to host after a delay
+      if (state.currentRoom && !state.isRoomHost) {
+        setTimeout(() => connectToHost(state.currentRoom), 2000);
+      }
+    } else if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') {
+      setStatus($('#socketStatus'), `Сигналинг: ошибка сети (${t}), переподключение…`, 'bad');
+      updateConnectionIndicator();
+    } else {
+      setStatus($('#socketStatus'), `Сигналинг: ${err.message || t}`, 'bad');
+      updateConnectionIndicator();
+    }
+  });
+  peer.on('disconnected', () => {
+    setStatus($('#socketStatus'), 'Сигналинг: отключён, переподключение…', 'warn');
+    updateConnectionIndicator();
+    try { peer.reconnect(); } catch {}
+  });
 }
 
-/* ---------- Join a room (register deterministic host ID if available) ---------- */
-async function joinPeerRoom(room) {
-  if (!state.peer) { state.pendingJoin = { code: room.code, inviteToken: state.currentInviteToken }; state.pendingJoinId = room.id; state.pendingJoinTitle = room.title; setStatus($('#socketStatus'), 'Сигналинг: ждём подключение для входа в комнату', 'warn'); return; }
-  if (!state.peerId) { state.pendingJoin = { code: room.code, inviteToken: state.currentInviteToken }; state.pendingJoinId = room.id; state.pendingJoinTitle = room.title; return; }
+// Create a peer for the room. If tryHost=true, try to register with the
+// deterministic room ID. Otherwise use a random ID.
+function createRoomPeer(room, tryHost) {
+  if (!room) return;
+  const peerId = tryHost ? ROOM_PEER_ID(room.code) : undefined;
+  const peer = new Peer(peerId, { debug: 1 });
+  state.peer = peer;
+  setupPeerEventHandlers(peer);
+}
 
-  // Tear down any prior room mesh
-  teardownMesh();
-
+// Client connects to host via data connection
+function connectToHost(room) {
+  if (!state.peer || !state.peerId || !room) return;
   const hostId = ROOM_PEER_ID(room.code);
-  state.currentRoom = room;
-  state.currentRoomCode = room.code;
+  if (hostId === state.peerId) return; // I AM the host
 
-  // Try to register as the host first. If that ID is taken, become a client
-  // and connect to the existing host.
-  try {
-    const probe = new Peer(hostId, { debug: 1 });
-    state.roomPeer = probe;
-    probe.on('open', () => {
-      state.isRoomHost = true;
-      toast(`Вы хост комнаты ${room.code}.`, 'ok');
-      renderPresence();
-      // Listen for incoming connections on this host peer
-      probe.on('connection', (conn) => onDataConnectionIncoming(conn));
-      probe.on('call', (call) => onMediaCallIncoming(call));
-    });
-    let idTakenHandled = false;
-    probe.on('error', (err) => {
-      if (err?.type === 'unavailable-id') {
-        // Host already exists — destroy probe and become a client connecting to host.
-        // This is normal flow, not a real error, so we suppress the console noise.
-        if (idTakenHandled) return;
-        idTakenHandled = true;
-        try { probe.destroy(); } catch {}
-        state.roomPeer = null;
-        state.isRoomHost = false;
-        becomeClient(room);
-      } else {
-        console.warn('[roomPeer] error', err);
-      }
-    });
-  } catch (e) {
-    state.isRoomHost = false;
-    becomeClient(room);
-  }
-}
-
-function becomeClient(room) {
-  const hostId = ROOM_PEER_ID(room.code);
-  toast(`Подключаемся к хосту ${room.code}…`, 'info');
-  // Open a data connection to host
+  setStatus($('#socketStatus'), 'Сигналинг: подключение к хосту…', 'warn');
   const conn = state.peer.connect(hostId, {
     reliable: true,
     metadata: {
@@ -704,29 +712,67 @@ function becomeClient(room) {
   });
   conn.on('open', () => {
     state.dataConnections.set(hostId, conn);
-    toast('Подключено к хосту комнаты.', 'ok');
+    conn._displayName = 'Хост';
+    setStatus($('#socketStatus'), 'Сигналинг: подключён к комнате ✓', 'ok');
+    updateConnectionIndicator();
     renderPresence();
-    // Ask host for the current peer list (presence sync)
-    conn.send({ kind: 'presence-request', from: state.peerId, displayName: state.user.displayName || state.user.username });
-    // Re-broadcast current room state (chat history) request
-    conn.send({ kind: 'messages-request', from: state.peerId });
+    // Request presence list and chat history
+    try {
+      conn.send({ kind: 'presence-request', from: state.peerId, displayName: state.user.displayName || state.user.username });
+      conn.send({ kind: 'messages-request', from: state.peerId });
+    } catch {}
   });
   conn.on('data', (data) => onDataMessage(data, conn));
   conn.on('close', () => {
     state.dataConnections.delete(hostId);
-    toast('Хост покинул комнату.', 'warn');
+    const call = state.peerConnections.get(hostId);
+    if (call) { try { call.close(); } catch {} state.peerConnections.delete(hostId); }
+    state.remoteStreams.delete(hostId);
     renderPresence();
-    // Try to become the new host
-    if (state.currentRoom) {
-      setTimeout(() => {
-        if (state.dataConnections.size === 0 && state.currentRoom) {
-          toast('Пробую стать новым хостом…', 'info');
-          joinPeerRoom(state.currentRoom);
-        }
-      }, 600);
-    }
+    updateRemoteVideo();
+    updateConnectionIndicator();
+    toast('Хост покинул комнату. Попытка стать новым хостом…', 'warn');
+    // Try to become the new host after a short delay
+    setTimeout(() => {
+      if (state.currentRoom && state.dataConnections.size === 0) {
+        if (state.peer) { try { state.peer.destroy(); } catch {} }
+        state.peer = null;
+        state.peerId = null;
+        createRoomPeer(state.currentRoom, true);
+      }
+    }, 800);
   });
-  conn.on('error', (e) => console.warn('[conn] error', e));
+  conn.on('error', (e) => console.warn('[client-conn] error', e));
+}
+
+function disconnectPeer() {
+  if (state.peer) { try { state.peer.destroy(); } catch {} }
+  state.peer = null;
+  state.peerId = null;
+  state.peerConnections.clear();
+  state.dataConnections.clear();
+  state.remoteStreams.clear();
+  state.isRoomHost = false;
+  setStatus($('#socketStatus'), 'Сигналинг: не подключён', 'warn');
+  updateConnectionIndicator();
+}
+
+/* ---------- Join a room ---------- */
+async function joinPeerRoom(room) {
+  await ensurePeerJS();
+  if (!_peerReady) {
+    setStatus($('#socketStatus'), 'Сигналинг: PeerJS не загружен', 'bad');
+    return;
+  }
+
+  // Tear down any existing peer + connections
+  teardownMesh();
+
+  state.currentRoom = room;
+  state.currentRoomCode = room.code;
+
+  // Create a fresh peer and try to become host
+  createRoomPeer(room, true);
 }
 
 function teardownMesh() {
@@ -735,9 +781,12 @@ function teardownMesh() {
   state.peerConnections.clear();
   state.dataConnections.clear();
   state.remoteStreams.clear();
-  if (state.roomPeer) { try { state.roomPeer.destroy(); } catch {} state.roomPeer = null; }
+  if (state.peer) { try { state.peer.destroy(); } catch {} }
+  state.peer = null;
+  state.peerId = null;
   state.isRoomHost = false;
   $('#remoteVideo').srcObject = null;
+  updateRemoteVideo();
 }
 
 /* ---------- Incoming data connections (host or peer) ---------- */
@@ -951,6 +1000,7 @@ function broadcastPresence() {
     try { c.send({ kind: 'presence-list', peers: peers.filter((p) => p !== pid), from: state.peerId }); } catch {}
   }
   renderPresence();
+  updateConnectionIndicator();
 }
 
 /* ============================================================
@@ -1510,6 +1560,188 @@ function initIconTooltips(root = document) {
 /* ============================================================
  * Event bindings & init
  * ============================================================ */
+/* ============================================================
+ * ECharts Stats Dashboard
+ * ============================================================ */
+const _charts = {};
+
+function ensureChart(id) {
+  if (typeof echarts === 'undefined') return null;
+  if (_charts[id]) { _charts[id].dispose(); }
+  const el = document.getElementById(id);
+  if (!el) return null;
+  _charts[id] = echarts.init(el, null, { renderer: 'canvas' });
+  return _charts[id];
+}
+
+async function refreshStats() {
+  if (typeof echarts === 'undefined') {
+    toast('ECharts не загружен.', 'bad');
+    return;
+  }
+  await ensureDb();
+  const rl = await GH.rateLimitInfo().catch(() => null);
+  const h = state.health?.gh || {};
+
+  // Calculate storage size (approximate: db.json size + sum of all media sizes)
+  const dbStr = JSON.stringify(_db);
+  const dbSize = new Blob([dbStr]).size;
+  const filesTotalSize = (_db.media || []).reduce((s, m) => s + (m.size || 0), 0);
+  const totalSize = dbSize + filesTotalSize;
+  const githubRepoLimit = 1024 * 1024 * 1024; // 1 GB soft limit for free repos
+
+  // Stats pills
+  $('#statUsers').textContent = (_db.users || []).length;
+  $('#statRooms').textContent = (_db.rooms || []).length;
+  $('#statMessages').textContent = (_db.messages || []).length;
+  $('#statFiles').textContent = (_db.media || []).filter(m => !m.deletedAt).length;
+  $('#statSize').textContent = fmtBytes(totalSize);
+  $('#statApiRemaining').textContent = rl?.remaining ?? h.remaining ?? '?';
+
+  // Chart 1: Storage gauge
+  const c1 = ensureChart('chartStorage');
+  if (c1) {
+    c1.setOption({
+      series: [{
+        type: 'gauge',
+        startAngle: 200, endAngle: -20,
+        min: 0, max: githubRepoLimit,
+        progress: { show: true, width: 14, roundCap: true },
+        axisLine: { lineStyle: { width: 14, color: [[0.5, '#10b981'], [0.8, '#f59e0b'], [1, '#ef4444']] } },
+        pointer: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: { show: false },
+        data: [{ value: totalSize, name: 'Использовано' }],
+        title: { offsetCenter: [0, '70%'], fontSize: 12, color: '#94a3b8' },
+        detail: {
+          offsetCenter: [0, '30%'],
+          formatter: () => fmtBytes(totalSize) + ' / 1 GB',
+          color: '#f1f5f9', fontSize: 14, fontWeight: 700
+        }
+      }]
+    });
+  }
+
+  // Chart 2: API limit gauge
+  const c2 = ensureChart('chartApiLimit');
+  if (c2) {
+    const remaining = rl?.remaining ?? h.remaining ?? 0;
+    const limit = rl?.limit ?? h.limit ?? 5000;
+    const used = limit - remaining;
+    c2.setOption({
+      series: [{
+        type: 'gauge',
+        startAngle: 200, endAngle: -20,
+        min: 0, max: limit,
+        progress: { show: true, width: 14, roundCap: true, itemStyle: { color: '#6366f1' } },
+        axisLine: { lineStyle: { width: 14, color: [[1, 'rgba(255,255,255,0.08)']] } },
+        pointer: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: { show: false },
+        data: [{ value: remaining, name: 'Осталось' }],
+        title: { offsetCenter: [0, '70%'], fontSize: 12, color: '#94a3b8' },
+        detail: {
+          offsetCenter: [0, '30%'],
+          formatter: () => remaining + ' / ' + limit,
+          color: '#f1f5f9', fontSize: 14, fontWeight: 700
+        }
+      }]
+    });
+  }
+
+  // Chart 3: Activity timeline (last 14 days)
+  const c3 = ensureChart('chartActivity');
+  if (c3) {
+    const days = 14;
+    const now = new Date();
+    const labels = [];
+    const msgCounts = [];
+    const fileCounts = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(now); d.setDate(d.getDate() - i);
+      const dayStr = d.toISOString().slice(0, 10);
+      labels.push(d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }));
+      msgCounts.push((_db.messages || []).filter(m => (m.createdAt || '').slice(0, 10) === dayStr).length);
+      fileCounts.push((_db.media || []).filter(m => (m.createdAt || '').slice(0, 10) === dayStr).length);
+    }
+    c3.setOption({
+      tooltip: { trigger: 'axis', backgroundColor: 'rgba(17,24,39,0.95)', borderColor: 'rgba(255,255,255,0.1)', textStyle: { color: '#f1f5f9' } },
+      legend: { data: ['Сообщения', 'Файлы'], textStyle: { color: '#94a3b8' }, top: 0 },
+      grid: { left: 30, right: 16, top: 36, bottom: 24 },
+      xAxis: { type: 'category', data: labels, axisLabel: { color: '#64748b', fontSize: 10 }, axisLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } } },
+      yAxis: { type: 'value', minInterval: 1, axisLabel: { color: '#64748b', fontSize: 10 }, splitLine: { lineStyle: { color: 'rgba(255,255,255,0.05)' } } },
+      series: [
+        { name: 'Сообщения', type: 'bar', data: msgCounts, itemStyle: { color: '#6366f1', borderRadius: [4, 4, 0, 0] } },
+        { name: 'Файлы', type: 'bar', data: fileCounts, itemStyle: { color: '#10b981', borderRadius: [4, 4, 0, 0] } }
+      ]
+    });
+  }
+
+  // Chart 4: File types pie
+  const c4 = ensureChart('chartFileTypes');
+  if (c4) {
+    const typeCount = {};
+    (_db.media || []).filter(m => !m.deletedAt).forEach(m => { typeCount[m.kind] = (typeCount[m.kind] || 0) + 1; });
+    const pieData = Object.entries(typeCount).map(([name, value]) => ({ name, value }));
+    const colorMap = { video: '#6366f1', audio: '#10b981', image: '#f59e0b', pdf: '#ef4444', text: '#38bdf8', other: '#8b5cf6' };
+    c4.setOption({
+      tooltip: { backgroundColor: 'rgba(17,24,39,0.95)', borderColor: 'rgba(255,255,255,0.1)', textStyle: { color: '#f1f5f9' } },
+      series: [{
+        type: 'pie', radius: ['45%', '70%'], center: ['50%', '52%'],
+        data: pieData.length ? pieData : [{ name: 'Нет данных', value: 1, itemStyle: { color: 'rgba(255,255,255,0.08)' } }],
+        label: { color: '#94a3b8', fontSize: 11 },
+        itemStyle: { borderColor: 'rgba(11,15,30,0.8)', borderWidth: 2 },
+        color: pieData.map(d => colorMap[d.name] || '#8b5cf6')
+      }]
+    });
+  }
+
+  toast('Статистика обновлена.', 'ok');
+}
+
+/* ============================================================
+ * Drag-and-drop file upload
+ * ============================================================ */
+function setupDragAndDrop() {
+  const overlay = $('#dropOverlay');
+  if (!overlay) return;
+  let dragCounter = 0;
+
+  window.addEventListener('dragenter', (e) => {
+    if (!state.user) return;
+    e.preventDefault();
+    dragCounter++;
+    overlay.classList.add('active');
+  });
+  window.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) { dragCounter = 0; overlay.classList.remove('active'); }
+  });
+  window.addEventListener('dragover', (e) => { e.preventDefault(); });
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    overlay.classList.remove('active');
+    if (!state.user) return;
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (!files.length) return;
+    // Switch to files tab
+    tab('files');
+    const note = '';
+    for (const file of files) {
+      if (file.size > 100 * 1024 * 1024) { toast(`${file.name}: больше 100 MB.`, 'bad'); continue; }
+      try {
+        await saveMediaBlob(file, 'file', note, file.name);
+        toast(`Загружено: ${file.name}`, 'ok');
+      } catch (e) { toast(`${file.name}: ${e.message}`, 'bad'); }
+    }
+    await refreshFiles();
+  });
+}
+
 function bind() {
   $$('.tab').forEach((b) => b.addEventListener('click', () => tab(b.dataset.tab)));
   $$('.menu-open').forEach((b) => b.addEventListener('click', openMenu));
@@ -1554,19 +1786,21 @@ function bind() {
   bindClick('#uploadFilesBtn', uploadFiles);
   $('#fileInput')?.addEventListener('change', updateFilePickerText);
   bindClick('#refreshFilesBtn', refreshFiles);
+  bindClick('#refreshStatsBtn', refreshStats);
   bindClick('#addUserBtn', addUser);
   bindClick('#refreshUsersBtn', refreshUsers);
   bindClick('#resetAllBtn', resetAllData);
   bindClick('#closePreviewBtn', () => $('#previewDialog')?.close());
   $('#previewDialog')?.addEventListener('click', (e) => {
-    // Close when clicking outside the content
     if (e.target === $('#previewDialog')) $('#previewDialog').close();
   });
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.installPrompt = e; $('#installBtn')?.classList.remove('hidden'); });
   bindClick('#installBtn', async () => { if (state.installPrompt) await state.installPrompt.prompt(); });
-  // Keyboard: Enter on login fields triggers login
   $('#loginUser')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#loginPass')?.focus(); });
   $('#loginPass')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+
+  // Drag-and-drop file upload
+  setupDragAndDrop();
 }
 
 async function init() {

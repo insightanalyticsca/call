@@ -7,11 +7,12 @@
   <title>Семейная связь</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="styles.css?v=20260727-ghp8" />
+  <link rel="stylesheet" href="styles.css?v=20260727-ux2" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
-  <script src="gh-store.js?v=20260727-ghp8" defer></script>
-  <script src="app.js?v=20260727-ghp8" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" defer></script>
+  <script src="gh-store.js?v=20260727-ux2" defer></script>
+  <script src="app.js?v=20260727-ux2" defer></script>
 </head>
 <body class="auth-only">
   <noscript>Для работы приложения нужен JavaScript.</noscript>
@@ -66,6 +67,9 @@
           <div class="call-room-title">
             <strong id="currentRoomTitle">Комната не выбрана</strong>
             <span id="currentRoomCode">-</span>
+          </div>
+          <div id="connQuality" class="conn-badge idle">
+            <span class="conn-dot"></span><span>Нет комнаты</span>
           </div>
         </div>
 
@@ -188,6 +192,43 @@
       </article>
     </section>
 
+    <section id="stats" class="tab-panel content-page">
+      <div class="content-head">
+        <div><div class="eyebrow">Аналитика</div><h2>Статистика</h2></div>
+        <button class="round-glass menu-open" title="Меню"><span data-icon="bars"></span></button>
+      </div>
+      <div class="stats-grid">
+        <article class="glass-card stats-card">
+          <h3>Хранилище GitHub</h3>
+          <div id="chartStorage" class="stats-chart"></div>
+        </article>
+        <article class="glass-card stats-card">
+          <h3>API лимит</h3>
+          <div id="chartApiLimit" class="stats-chart"></div>
+        </article>
+        <article class="glass-card stats-card" style="grid-column:1/-1">
+          <h3>Активность по дням</h3>
+          <div id="chartActivity" class="stats-chart" style="height:240px"></div>
+        </article>
+        <article class="glass-card stats-card">
+          <h3>Типы файлов</h3>
+          <div id="chartFileTypes" class="stats-chart"></div>
+        </article>
+        <article class="glass-card stats-card">
+          <h3>Обзор</h3>
+          <div class="stats-row">
+            <div class="stats-pill"><strong id="statUsers">0</strong><span>пользователей</span></div>
+            <div class="stats-pill"><strong id="statRooms">0</strong><span>комнат</span></div>
+            <div class="stats-pill"><strong id="statMessages">0</strong><span>сообщений</span></div>
+            <div class="stats-pill"><strong id="statFiles">0</strong><span>файлов</span></div>
+            <div class="stats-pill"><strong id="statSize">0 B</strong><span>размер</span></div>
+            <div class="stats-pill"><strong id="statApiRemaining">0</strong><span>API осталось</span></div>
+          </div>
+        </article>
+      </div>
+      <button id="refreshStatsBtn" class="ghost full" style="max-width:760px;margin:12px auto 0"><span data-icon="rotate"></span><span>Обновить статистику</span></button>
+    </section>
+
     <section id="admin" class="tab-panel content-page">
       <div class="content-head">
         <div><div class="eyebrow">Управление</div><h2>Админ</h2></div>
@@ -222,6 +263,7 @@
         <button class="tab menu-tile" data-tab="chat"><span data-icon="comment"></span><strong>Чат</strong><small>сообщения</small></button>
         <button class="tab menu-tile" data-tab="mail"><span data-icon="microphone"></span><strong>Почта</strong><small>audio/video</small></button>
         <button class="tab menu-tile" data-tab="files"><span data-icon="folder"></span><strong>Файлы</strong><small>upload/replay/dl</small></button>
+        <button class="tab menu-tile" data-tab="stats"><span data-icon="signal"></span><strong>Статы</strong><small>графики</small></button>
         <button class="tab menu-tile admin-only hidden" data-tab="admin"><span data-icon="user-gear"></span><strong>Админ</strong><small>users/pass</small></button>
       </div>
       <div id="userCard" class="user-card hidden">
@@ -243,6 +285,13 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+
+  <div id="dropOverlay" class="drop-overlay">
+    <div class="drop-overlay-inner">
+      <span data-icon="cloud-arrow-up" style="font-size:48px;display:block;margin-bottom:12px"></span>
+      Отпустите файлы для загрузки
+    </div>
+  </div>
 
   <dialog id="previewDialog" class="preview-dialog">
     <div class="dialog-head">
