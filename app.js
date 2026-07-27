@@ -1179,7 +1179,18 @@ async function inlinePlayerInto(m, holder) {
     if (!url) { holder.innerHTML = '<span class="meta warn-text">Файл не найден.</span>'; return; }
     m._url = url;
     if (m.kind === 'audio') holder.innerHTML = `<div class="media-player"><audio controls src="${url}"></audio></div>`;
-    else if (m.kind === 'video') holder.innerHTML = `<div class="media-player"><video controls playsinline src="${url}"></video></div>`;
+    else if (m.kind === 'video') {
+      const isMov = (m.mime === 'video/quicktime' || m.originalName.toLowerCase().endsWith('.mov'));
+      holder.innerHTML = `<div class="media-player"><video controls playsinline src="${url}"></video></div>`;
+      const v = holder.querySelector('video');
+      v.addEventListener('error', () => {
+        holder.innerHTML = `<div class="media-placeholder" style="padding:20px;text-align:center">
+          <span class="meta" style="display:block;margin-bottom:8px">Видео не поддерживается браузером</span>
+          <a class="button small" href="${url}" download="${escapeHtml(m.originalName)}"><span data-icon="download"></span><span>Скачать оригинал</span></a>
+        </div>`;
+        renderIcons(holder);
+      });
+    }
     else if (m.kind === 'image') holder.innerHTML = `<div class="media-player"><img src="${url}" alt="${escapeHtml(m.originalName)}" loading="lazy" style="max-width:100%;border-radius:14px"></div>`;
     else if (m.kind === 'pdf') holder.innerHTML = `<div class="media-player"><iframe src="${url}"></iframe></div>`;
     else holder.innerHTML = '';
@@ -1198,7 +1209,20 @@ async function openPreview(m) {
     $('#previewDownload').href = url;
     $('#previewDownload').setAttribute('download', m.originalName);
     body.innerHTML = '';
-    if (m.kind === 'video') body.innerHTML = `<video controls autoplay playsinline src="${url}"></video>`;
+    if (m.kind === 'video') {
+      const isMov = (m.mime === 'video/quicktime' || m.originalName.toLowerCase().endsWith('.mov'));
+      body.innerHTML = `<video controls autoplay playsinline src="${url}"></video>`;
+      const v = body.querySelector('video');
+      v.addEventListener('error', () => {
+        body.innerHTML = `
+          <div style="text-align:center;padding:20px">
+            <p style="margin:0 0 12px;font-size:15px">Видео не может быть воспроизведено в браузере.</p>
+            <p style="margin:0 0 16px;font-size:13px;color:var(--text-muted)">${isMov ? 'MOV файлы с необычным кодеком не поддерживаются. ' : ''}Скачайте оригинал, чтобы открыть в видеоплеере.</p>
+            <a class="primary" href="${url}" download="${escapeHtml(m.originalName)}" style="display:inline-flex"><span data-icon="download"></span><span>Скачать оригинал</span></a>
+          </div>`;
+        renderIcons(body);
+      });
+    }
     else if (m.kind === 'audio') body.innerHTML = `<audio controls autoplay src="${url}"></audio>`;
     else if (m.kind === 'image') body.innerHTML = `<img src="${url}" alt="${escapeHtml(m.originalName)}" />`;
     else if (m.kind === 'pdf') body.innerHTML = `<iframe src="${url}"></iframe>`;

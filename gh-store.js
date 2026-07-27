@@ -229,9 +229,15 @@ const GH = (function () {
     // We have to fetch and create a blob URL because the raw URL requires auth header.
     const blob = await getFile(id);
     if (!blob) return null;
-    // If caller supplied mime (from db.json metadata), re-wrap with correct type
-    if (mime && mime !== 'application/octet-stream') {
-      return URL.createObjectURL(new Blob([blob], { type: mime }));
+    // Normalize MIME: browsers can't play video/quicktime (MOV), but MOV and MP4
+    // share the same ISO BMFF container format. Serving MOV bytes as video/mp4
+    // lets Chrome/Firefox/Edge play H.264/AAC content recorded on iPhones.
+    let finalMime = mime;
+    if (mime === 'video/quicktime' || mime === 'video/x-quicktime') {
+      finalMime = 'video/mp4';
+    }
+    if (finalMime && finalMime !== 'application/octet-stream') {
+      return URL.createObjectURL(new Blob([blob], { type: finalMime }));
     }
     return URL.createObjectURL(blob);
   }
