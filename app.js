@@ -331,12 +331,14 @@ async function login() {
   if (!u) { toast('Пользователь не найден.', 'bad'); return; }
   const ok = await verifyPassword(password, u.salt, u.hash);
   if (!ok) { toast('Неверный пароль.', 'bad'); return; }
-  u.lastLoginAt = new Date().toISOString();
-  await saveDb(_db);
+  // Set user state FIRST so login succeeds even if db write fails
   state.user = { id: u.id, username: u.username, displayName: u.displayName, role: u.role };
   setSession(state.user);
   requireLoginUi();
   toast('Вход выполнен.', 'ok');
+  // Non-blocking: update lastLoginAt in background
+  u.lastLoginAt = new Date().toISOString();
+  saveDb(_db).catch((e) => console.warn('lastLoginAt save failed', e));
   await refreshAll();
   const joinedFromInvite = await autoJoinFromUrl();
   maybeOpenRoomChooser(joinedFromInvite);
@@ -482,6 +484,8 @@ async function selectRoom(id, inviteToken = null) {
   renderRooms();
   renderPresence();
   updateConnectionIndicator();
+  // Close the rooms drawer so user sees the call screen
+  closeDrawers();
 }
 function makeInviteUrl(code, token) {
   const base = `${location.origin}${location.pathname.replace(/\/index\.html$/, '/')}`;

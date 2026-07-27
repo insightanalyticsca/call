@@ -159,10 +159,8 @@ const GH = (function () {
   function updateDb(mutator, message = 'update db.json') {
     return new Promise((resolve, reject) => {
       _dbWriteQueue = _dbWriteQueue.then(async () => {
-        // Debounce: if a write is already pending, replace its mutator with this one's effect
-        // For simplicity, we just chain writes — each waits 600ms after the previous
         await new Promise((r) => { setTimeout(r, DB_DEBOUNCE_MS); });
-        for (let attempt = 0; attempt < 5; attempt++) {
+        for (let attempt = 0; attempt < 8; attempt++) {
           try {
             const current = await getDb(); // always fetch fresh
             if (!current.db) {
@@ -180,13 +178,13 @@ const GH = (function () {
             const b64 = strToB64(JSON.stringify(newDb, null, 2));
             const r = await putContents('db.json', b64, message, current.sha);
             _dbCache = { db: newDb, sha: r.content.sha };
-            syncLastSha(r.content.sha); // tell polling layer we already know about this SHA
+            syncLastSha(r.content.sha);
             resolve(newDb);
             return;
           } catch (e) {
             if (e.status === 409 || e.status === 422) {
-              // SHA mismatch — someone else wrote first. Wait a bit and retry.
-              await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+              // SHA mismatch — someone else wrote first. Exponential backoff.
+              await new Promise((r) => setTimeout(r, 500 * Math.pow(2, attempt)));
               continue;
             }
             reject(e);
