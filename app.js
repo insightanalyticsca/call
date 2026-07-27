@@ -102,27 +102,13 @@ function escapeHtml(v) { return String(v ?? '').replace(/[&<>'"]/g, (c) => ({ '&
 function setStatus(el, text, kind = '') { if (!el) return; el.textContent = text; el.className = `status-pill ${kind}`.trim(); }
 
 // Connection quality indicator — updates the call screen badge
-async function updateConnectionIndicator() {
+function updateConnectionIndicator() {
   const badge = $('#connQuality');
   if (!badge) return;
-  const peers = state.dataConnections?.size || 0;
-  const calls = state.peerConnections?.size || 0;
+  const peerCount = _peerNames.size;
+  const calls = state.remoteStreams.size;
   const hasPeer = !!state.peer;
   const hasRoom = !!state.currentRoom;
-  // Also count known peers from db.json (more accurate)
-  let dbPeerCount = 0;
-  try {
-    if (_db && hasRoom) {
-      const room = _db.rooms.find((r) => r.code === state.currentRoom?.code);
-      if (room?.peers) {
-        const now = Date.now();
-        dbPeerCount = room.peers.filter((p) => {
-          if (p.peerId === state.peerId) return false;
-          return (now - new Date(p.lastSeen || p.joinedAt).getTime()) < 90000;
-        }).length;
-      }
-    }
-  } catch {}
 
   if (!hasRoom) {
     badge.className = 'conn-badge idle';
@@ -130,15 +116,15 @@ async function updateConnectionIndicator() {
   } else if (!hasPeer) {
     badge.className = 'conn-badge connecting';
     badge.innerHTML = '<span class="conn-dot pulse"></span><span>Подключение…</span>';
-  } else if (peers === 0 && dbPeerCount === 0) {
+  } else if (peerCount === 0) {
     badge.className = 'conn-badge waiting';
     badge.innerHTML = '<span class="conn-dot pulse"></span><span>Ожидание участников…</span>';
   } else if (calls > 0) {
     badge.className = 'conn-badge live';
-    badge.innerHTML = '<span class="conn-dot live"></span><span>В эфире · ' + Math.max(peers, dbPeerCount) + ' участн.</span>';
+    badge.innerHTML = '<span class="conn-dot live"></span><span>В эфире · ' + peerCount + ' участн.</span>';
   } else {
     badge.className = 'conn-badge ready';
-    badge.innerHTML = '<span class="conn-dot"></span><span>' + Math.max(peers, dbPeerCount) + ' участн. в комнате</span>';
+    badge.innerHTML = '<span class="conn-dot"></span><span>' + peerCount + ' участн. в комнате</span>';
   }
 }
 function isLocalOrigin() { return ['localhost', '127.0.0.1', '::1'].includes(location.hostname); }
@@ -609,458 +595,223 @@ async function joinByCode(code, inviteToken) {
 }
 function renderPresence() {
   const me = state.user?.displayName || state.user?.username || 'Я';
-  const others = Array.from(state.dataConnections.values()).map((c) => c._displayName || c.metadata?.displayName || c.metadata?.username || 'Гость');
+  const others = Array.from(_peerNames.values());
   const all = [me, ...others];
   $('#presenceBox').textContent = `Участники: ${all.join(', ') || '-'}`;
 }
 
 /* ============================================================
- * PeerJS — WebRTC signaling & data channel (replaces Socket.io)
+ * Trystero — WebRTC signaling via Nostr relays (replaces PeerJS)
  *
- * Strategy:
- *   - The room itself has a deterministic peer ID: PEER_ID_PREFIX + "room-" + code
- *   - The FIRST user to join the room registers that ID and becomes the "host"
- *   - Subsequent users register random IDs and connect to the host ID
- *   - Host relays presence: when a new peer connects, host tells all existing
- *     peers about the new peer, and tells the new peer about everyone
- *   - Each pair of peers establishes its own MediaConnection (full mesh)
- *
- * For 1-to-1 family calls, the host-join model is enough on its own.
+ * Trystero auto-discovers peers in the same room via public Nostr relays.
+ * No broker server, no peer ID registry in db.json, no manual discovery.
+ * Chat sync uses Trystero's broadcast/onMessage for real-time delivery.
+ * db.json polling remains for persistence (chat history, files, users).
  * ============================================================ */
-/* ============================================================
- * PeerJS — GitHub-discovery architecture (v3, reliable)
- *
- * Each client:
- *   1. Creates a peer with a RANDOM ID (no host election, no deterministic IDs)
- *   2. On room join: writes {peerId, displayName, joinedAt} to db.json room.peers[]
- *   3. Polls db.json every 10s (existing poll) → discovers new peers in room.peers[]
- *   4. For each new peer: opens a data connection (full mesh)
- *   5. On leave/logout: removes own peerId from room.peers[]
- *   6. Media calls use the SAME peer → remote side always recognizes the caller
- *
- * This is more reliable than deterministic host IDs because:
- *   - No dependency on a specific PeerJS ID being available
- *   - No host election / failover complexity
- *   - Works even if peers come and go
- *   - Uses existing GitHub polling infrastructure for discovery
- * ============================================================ */
-function waitForPeerJS(timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    (function check() {
-      if (typeof Peer !== 'undefined' && typeof Peer === 'function') return resolve();
-      if (Date.now() - start > timeoutMs) return reject(new Error('PeerJS library not loaded'));
-      setTimeout(check, 60);
-    })();
-  });
-}
 
-let _peerReady = false;
-async function ensurePeerJS() {
-  if (_peerReady) return true;
-  await waitForPeerJS().catch(() => {});
-  _peerReady = (typeof Peer !== 'undefined');
-  return _peerReady;
-}
+let _trysteroMod = null;   // { joinRoom, selfId }
+let _room = null;          // Trystero room tuple
+let _peerNames = new Map(); // peerId -> displayName
+let _stopStreams = new Map(); // peerId -> stopStream function (from makePeer)
 
-// Create a peer with a random ID
-async function createMyPeer() {
-  if (state.peer) return; // already have one
-  await ensurePeerJS();
-  if (!_peerReady) {
-    setStatus($('#socketStatus'), 'Сигналинг: PeerJS не загружен', 'bad');
-    return;
-  }
+async function ensureTrystero() {
+  if (_trysteroMod) return _trysteroMod;
   try {
-    const peer = new Peer({ debug: 1, config: { iceServers: ICE_SERVERS } }); // random ID, with TURN servers for NAT traversal
-    state.peer = peer;
-    peer.on('open', (id) => {
-      state.peerId = id;
-      setStatus($('#socketStatus'), 'Сигналинг: подключён ✓', 'ok');
-      updateConnectionIndicator();
-      // Register self in db.json room.peers
-      registerMyPeerInRoom().catch(() => {});
-    });
-    peer.on('connection', (conn) => onDataConnectionIncoming(conn));
-    peer.on('call', (call) => onMediaCallIncoming(call));
-    peer.on('error', (err) => {
-      console.warn('[peer] error', err);
-      const t = err?.type || 'error';
-      if (t === 'peer-unavailable') {
-        // Expected when a stale peer ID is in db.json — ignore
-        // The discovery poll will not re-attempt this peer
-      } else if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') {
-        setStatus($('#socketStatus'), `Сигналинг: ошибка сети (${t}), переподключение…`, 'bad');
-        updateConnectionIndicator();
-        setTimeout(() => { try { peer.reconnect(); } catch {} }, 2000);
-      } else if (t === 'unavailable-id') {
-        // Random ID collision — extremely rare, just retry
-        setStatus($('#socketStatus'), 'Сигналинг: коллизия ID, повтор…', 'warn');
-        try { peer.destroy(); } catch {}
-        state.peer = null;
-        state.peerId = null;
-        setTimeout(() => createMyPeer(), 500);
-      } else {
-        setStatus($('#socketStatus'), `Сигналинг: ${err.message || t}`, 'bad');
-        updateConnectionIndicator();
-      }
-    });
-    peer.on('disconnected', () => {
-      setStatus($('#socketStatus'), 'Сигналинг: отключён, переподключение…', 'warn');
-      updateConnectionIndicator();
-      try { peer.reconnect(); } catch {}
-    });
+    _trysteroMod = await import('https://cdn.jsdelivr.net/npm/trystero@0.21.0/+esm');
+    return _trysteroMod;
   } catch (e) {
-    setStatus($('#socketStatus'), `Сигналинг: ${e.message}`, 'bad');
+    console.error('[trystero] failed to load', e);
+    setStatus($('#socketStatus'), 'Сигналинг: ошибка загрузки Trystero', 'bad');
+    return null;
   }
 }
 
-// Register my peer ID in the room's peer list (in db.json)
-async function registerMyPeerInRoom() {
-  if (!state.currentRoom || !state.peerId) return;
-  await ensureDb();
-  const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
-  if (!room) return;
-  if (!room.peers) room.peers = [];
-  // Remove any stale entry of mine (same peerId or same userId)
-  room.peers = room.peers.filter((p) => p.peerId !== state.peerId && p.userId !== state.user.id);
-  // Add my fresh entry
-  room.peers.push({
-    peerId: state.peerId,
-    userId: state.user.id,
-    displayName: state.user.displayName || state.user.username,
-    username: state.user.username,
-    joinedAt: new Date().toISOString(),
-    lastSeen: new Date().toISOString()
-  });
-  await saveDb(_db);
-}
-
-// Remove my peer ID from the room's peer list
-async function unregisterMyPeerFromRoom() {
-  if (!state.currentRoom || !state.peerId) return;
-  try {
-    await ensureDb();
-    const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
-    if (!room || !room.peers) return;
-    const before = room.peers.length;
-    room.peers = room.peers.filter((p) => p.peerId !== state.peerId);
-    if (room.peers.length !== before) await saveDb(_db);
-  } catch (e) { console.warn('unregister peer failed', e); }
-}
-
-// Update my lastSeen timestamp (called periodically)
-async function touchMyPeerInRoom() {
-  if (!state.currentRoom || !state.peerId) return;
-  try {
-    await ensureDb();
-    const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
-    if (!room || !room.peers) return;
-    const me = room.peers.find((p) => p.peerId === state.peerId);
-    if (me && (Date.now() - new Date(me.lastSeen).getTime()) > 30000) {
-      me.lastSeen = new Date().toISOString();
-      await saveDb(_db);
-    }
-  } catch (e) { /* silent */ }
-}
-
-// Called when db.json poll detects changes — discover new peers in the room
-async function discoverPeersFromDb() {
-  if (!state.currentRoom || !state.peerId || !state.peer) return;
-  // PeerJS uses .open (boolean) and .destroyed — NOT .connected
-  if (state.peer.destroyed || !state.peer.open) return;
-  await ensureDb();
-  const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
-  if (!room || !room.peers) return;
-  // Filter out stale peers (lastSeen > 90s ago)
-  const now = Date.now();
-  const livePeers = room.peers.filter((p) => {
-    if (p.peerId === state.peerId) return false; // skip self
-    const age = now - new Date(p.lastSeen || p.joinedAt).getTime();
-    return age < 90000; // 90 seconds
-  });
-  // Connect to any peer we're not already connected to
-  for (const p of livePeers) {
-    if (state.dataConnections.has(p.peerId)) continue; // already connected
-    if (state._connectingTo && state._connectingTo.has(p.peerId)) continue; // already attempting
-    connectToPeer(p.peerId, p.displayName);
-  }
-  // Update presence with all known peers (even if not yet connected)
-  renderPresenceFromDb(livePeers);
-}
-
-// Render presence using db.json peer list (more accurate than data-connections-only)
-function renderPresenceFromDb(livePeers) {
-  const me = state.user?.displayName || state.user?.username || 'Я';
-  const others = (livePeers || []).map((p) => p.displayName || 'Гость');
-  const all = [me, ...others];
-  $('#presenceBox').textContent = `Участники: ${all.join(', ') || '-'}`;
-  // Update connection badge if we have peers but no data connections yet
-  updateConnectionIndicator();
-}
-
-// Connect to a specific peer via data connection
-function connectToPeer(remotePeerId, displayName) {
-  if (!state.peer || !state.peerId || !remotePeerId) return;
-  if (remotePeerId === state.peerId) return;
-  if (state.dataConnections.has(remotePeerId)) return;
-  if (!state._connectingTo) state._connectingTo = new Set();
-  if (state._connectingTo.has(remotePeerId)) return;
-  state._connectingTo.add(remotePeerId);
-
-  const conn = state.peer.connect(remotePeerId, {
-    reliable: true,
-    metadata: {
-      displayName: state.user.displayName || state.user.username,
-      username: state.user.username,
-      role: state.user.role,
-      peerId: state.peerId
-    }
-  });
-  conn._displayName = displayName || 'Гость';
-  let openTimeout = setTimeout(() => {
-    // If connection doesn't open in 8s, give up
-    state._connectingTo?.delete(remotePeerId);
-    try { conn.close(); } catch {}
-  }, 8000);
-  conn.on('open', () => {
-    clearTimeout(openTimeout);
-    state._connectingTo.delete(remotePeerId);
-    state.dataConnections.set(remotePeerId, conn);
-    setStatus($('#socketStatus'), 'Сигналинг: подключён к комнате ✓', 'ok');
-    updateConnectionIndicator();
-    renderPresence();
-    // Send hello so remote learns my name
-    try { conn.send({ kind: 'hello', from: state.peerId, displayName: state.user?.displayName || state.user?.username, username: state.user?.username, role: state.user?.role }); } catch {}
-    // Request chat history
-    try { conn.send({ kind: 'messages-request', from: state.peerId }); } catch {}
-  });
-  conn.on('data', (data) => onDataMessage(data, conn));
-  conn.on('close', () => {
-    clearTimeout(openTimeout);
-    state._connectingTo.delete(remotePeerId);
-    state.dataConnections.delete(remotePeerId);
-    const call = state.peerConnections.get(remotePeerId);
-    if (call) { try { call.close(); } catch {} state.peerConnections.delete(remotePeerId); }
-    state.remoteStreams.delete(remotePeerId);
-    renderPresence();
-    updateRemoteVideo();
-    updateConnectionIndicator();
-  });
-  conn.on('error', (e) => {
-    clearTimeout(openTimeout);
-    state._connectingTo.delete(remotePeerId);
-    console.warn('[peer-connect] error', e);
-    // Remove from dataConnections if it was there
-    state.dataConnections.delete(remotePeerId);
-    renderPresence();
-    updateConnectionIndicator();
-  });
-}
-
-function disconnectPeer() {
-  // Unregister from db.json first (best-effort)
-  unregisterMyPeerFromRoom().catch(() => {});
-  if (state.peer) { try { state.peer.destroy(); } catch {} }
-  state.peer = null;
-  state.peerId = null;
-  state.peerConnections.clear();
-  state.dataConnections.clear();
-  state.remoteStreams.clear();
-  state.isRoomHost = false;
-  if (state._connectingTo) state._connectingTo.clear();
-  setStatus($('#socketStatus'), 'Сигналинг: не подключён', 'warn');
-  updateConnectionIndicator();
-}
-
-/* ---------- Join a room ---------- */
 async function joinPeerRoom(room) {
-  await ensurePeerJS();
-  if (!_peerReady) {
-    setStatus($('#socketStatus'), 'Сигналинг: PeerJS не загружен', 'bad');
-    return;
+  const mod = await ensureTrystero();
+  if (!mod) return;
+
+  // Leave any existing room first
+  if (_room) {
+    try { _room.leave(); } catch {}
   }
-  // Tear down any existing peer + connections (but keep the same peer if already created)
-  teardownMesh();
+  _peerNames.clear();
+  for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
+  _stopStreams.clear();
+  state.remoteStreams.clear();
+
   state.currentRoom = room;
   state.currentRoomCode = room.code;
-  // Create peer if not exists, then register in room
-  if (!state.peer) {
-    await createMyPeer();
-    // Wait for peer 'open' event (state.peerId will be set)
-    for (let i = 0; i < 50 && !state.peerId; i++) await new Promise((r) => setTimeout(r, 100));
+
+  const config = {
+    appId: 'insightanalyticsca-call-v1',
+    rtcConfig: { iceServers: ICE_SERVERS }
+  };
+
+  try {
+    _room = mod.joinRoom(config, room.code);
+  } catch (e) {
+    console.error('[trystero] joinRoom failed', e);
+    setStatus($('#socketStatus'), 'Сигналинг: ошибка входа в комнату', 'bad');
+    return;
   }
-  await registerMyPeerInRoom();
-  // Immediately try to discover existing peers
-  discoverPeersFromDb();
-}
 
-function teardownMesh() {
-  for (const call of state.peerConnections.values()) { try { call.close(); } catch {} }
-  for (const conn of state.dataConnections.values()) { try { conn.close(); } catch {} }
-  state.peerConnections.clear();
-  state.dataConnections.clear();
-  state.remoteStreams.clear();
-  if (state._connectingTo) state._connectingTo.clear();
-  // Note: we do NOT destroy state.peer here — it's reused across rooms
-  $('#remoteVideo').srcObject = null;
-  updateRemoteVideo();
-}
+  // Set up custom actions for chat/hello/hangup sync
+  const [sendChat, onChat] = _room.makeAction('chat');
+  const [sendHello, onHello] = _room.makeAction('hello');
+  const [sendHangup, onHangup] = _room.makeAction('hangup');
 
-/* ---------- Incoming data connections (host or peer) ---------- */
-function onDataConnectionIncoming(conn) {
-  // Capture the remote peer's display name from connection metadata
-  const remoteName = conn.metadata?.displayName || conn.metadata?.username || 'Гость';
-  conn.on('open', () => {
-    state.dataConnections.set(conn.peer, conn);
-    // Store display name on the connection for renderPresence
-    conn._displayName = remoteName;
-    // Send a hello so the other side learns my display name too
-    try { conn.send({ kind: 'hello', from: state.peerId, displayName: state.user?.displayName || state.user?.username, username: state.user?.username, role: state.user?.role }); } catch {}
-    renderPresence();
+  state._sendChat = sendChat;
+  state._sendHello = sendHello;
+  state._sendHangup = sendHangup;
+  state._room = _room;
+  state.peer = { connected: true };
+  state.peerId = mod.selfId;
+
+  setStatus($('#socketStatus'), 'Сигналинг: подключён (Nostr) ✓', 'ok');
+  updateConnectionIndicator();
+
+  // Announce our presence to anyone already in the room
+  sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
+
+  // New peer joined — announce ourselves to them
+  _room.onPeerJoin((peerId) => {
+    console.log('[trystero] peer joined:', peerId.slice(0, 12));
+    sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
     updateConnectionIndicator();
   });
-  conn.on('data', (data) => onDataMessage(data, conn));
-  conn.on('close', () => {
-    state.dataConnections.delete(conn.peer);
-    const call = state.peerConnections.get(conn.peer);
-    if (call) { try { call.close(); } catch {} state.peerConnections.delete(conn.peer); }
-    state.remoteStreams.delete(conn.peer);
+
+  // Peer left
+  _room.onPeerLeave((peerId) => {
+    console.log('[trystero] peer left:', peerId.slice(0, 12));
+    _peerNames.delete(peerId);
+    state.remoteStreams.delete(peerId);
+    _stopStreams.delete(peerId);
     renderPresence();
     updateRemoteVideo();
     updateConnectionIndicator();
   });
-  conn.on('error', (e) => console.warn('[conn-in] error', e));
-}
 
-/* ---------- Incoming media calls ---------- */
-function onMediaCallIncoming(call) {
-  // Ensure we have local media to answer with
-  ensureLocalMedia(true).catch(async (e) => {
-    toast(`${e.message} Пробую только микрофон.`, 'warn');
-    return ensureLocalMedia(false);
-  }).then(() => {
-    if (!state.localStream) { try { call.close(); } catch {}; return; }
-    call.answer(state.localStream);
-    attachCallHandlers(call);
-  });
-}
-
-function attachCallHandlers(call) {
-  state.peerConnections.set(call.peer, call);
-  call.on('stream', (remoteStream) => {
-    state.remoteStreams.set(call.peer, remoteStream);
+  // Received a remote stream (peer is sending video/audio to us)
+  _room.onPeerStream((stream, peerId) => {
+    console.log('[trystero] stream from:', peerId.slice(0, 12));
+    state.remoteStreams.set(peerId, stream);
     updateRemoteVideo();
     setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
     $('#pcState').textContent = `PC: connected (${state.remoteStreams.size})`;
     $('#iceState').textContent = `ICE: connected`;
-  });
-  call.on('close', () => {
-    state.peerConnections.delete(call.peer);
-    state.remoteStreams.delete(call.peer);
-    updateRemoteVideo();
-    if (state.peerConnections.size === 0) {
-      setStatus($('#peerStatus'), 'WebRTC: нет соединения', 'warn');
-      $('#pcState').textContent = 'PC: нет данных';
-      $('#iceState').textContent = 'ICE: нет данных';
+    updateConnectionIndicator();
+    // Auto-send our stream back if we have one and haven't yet
+    if (state.localStream && !_stopStreams.has(peerId)) {
+      try {
+        const stop = _room.addStream(state.localStream, peerId);
+        _stopStreams.set(peerId, stop);
+      } catch (e) { console.warn('[auto addStream]', e); }
     }
   });
-  call.on('error', (e) => {
-    console.warn('[call] error', e);
-    toast(`WebRTC: ${e.message || e.type || 'error'}`, 'bad');
+
+  // Hello messages (presence/name exchange)
+  onHello((data, peerId) => {
+    _peerNames.set(peerId, data.displayName || data.username || 'Гость');
+    renderPresence();
+    updateConnectionIndicator();
+  });
+
+  // Chat messages (real-time sync)
+  onChat((data, peerId) => {
+    (async () => {
+      await ensureDb();
+      if (!_db.messages.some((m) => m.id === data.message.id)) {
+        _db.messages.push(data.message);
+        await saveDb(_db);
+        refreshMessages();
+      }
+    })();
+  });
+
+  // Hangup
+  onHangup((_data, peerId) => {
+    state.remoteStreams.delete(peerId);
+    _stopStreams.delete(peerId);
+    updateRemoteVideo();
+    updateConnectionIndicator();
+    toast('Собеседник завершил звонок.');
   });
 }
 
+// Broadcast a JSON object to all peers via the appropriate action
+function trysteroBroadcast(obj) {
+  if (!state._room) return;
+  try {
+    if (obj.kind === 'chat-message' && state._sendChat) state._sendChat(obj);
+    else if (obj.kind === 'hello' && state._sendHello) state._sendHello(obj);
+    else if (obj.kind === 'hangup' && state._sendHangup) state._sendHangup(obj);
+  } catch (e) {
+    console.warn('[trystero] broadcast failed', e);
+  }
+}
+
+// Handle incoming Trystero messages
+function handleTrysteroMessage(data, peerId) {
+  switch (data.kind) {
+    case 'hello':
+      _peerNames.set(peerId, data.displayName || data.username || 'Гость');
+      renderPresence();
+      updateConnectionIndicator();
+      break;
+    case 'chat-message':
+      (async () => {
+        await ensureDb();
+        if (!_db.messages.some((m) => m.id === data.message.id)) {
+          _db.messages.push(data.message);
+          await saveDb(_db);
+          refreshMessages();
+        }
+      })();
+      break;
+    case 'hangup':
+      state.remoteStreams.delete(peerId);
+      const stop = _stopStreams.get(peerId);
+      if (stop) { try { stop(); } catch {} _stopStreams.delete(peerId); }
+      updateRemoteVideo();
+      updateConnectionIndicator();
+      toast('Собеседник завершил звонок.');
+      break;
+  }
+}
+
+function disconnectPeer() {
+  if (_room) {
+    try { _room.leave(); } catch {}
+  }
+  _room = null;
+  _peerNames.clear();
+  for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
+  _stopStreams.clear();
+  state.remoteStreams.clear();
+  state.peer = null;
+  state.peerId = null;
+  state._room = null;
+  state._sendChat = null;
+  state._sendHello = null;
+  state._sendHangup = null;
+  setStatus($('#socketStatus'), 'Сигналинг: не подключён', 'warn');
+  updateConnectionIndicator();
+}
+
 function updateRemoteVideo() {
-  // Pick the first available remote stream to render in the main video element
   const streams = Array.from(state.remoteStreams.values());
   if (streams.length === 0) {
     $('#remoteVideo').srcObject = null;
     return;
   }
-  // If only one peer, show them full-screen
   if (streams.length === 1) {
     $('#remoteVideo').srcObject = streams[0];
     return;
   }
-  // For multi-party, mix into a single MediaStream (browsers handle multiple tracks)
+  // Multi-party: mix into a single MediaStream
   const mixed = new MediaStream();
   for (const s of streams) s.getTracks().forEach((t) => mixed.addTrack(t));
   $('#remoteVideo').srcObject = mixed;
-}
-
-/* ---------- Data channel messages ---------- */
-function onDataMessage(data, conn) {
-  if (!data || typeof data !== 'object') return;
-  switch (data.kind) {
-    case 'hello': {
-      onHelloMessage(data, conn);
-      break;
-    }
-    // presence-request / presence-list / peer-announce are no longer used —
-    // peer discovery is now done via GitHub db.json polling (discoverPeersFromDb)
-    case 'chat-message': {
-      // Incoming chat message from a peer
-      (async () => {
-        await ensureDb();
-        // Deduplicate by id
-        if (_db.messages.some((m) => m.id === data.message.id)) return;
-        _db.messages.push(data.message);
-        await saveDb(_db);
-        refreshMessages();
-      })();
-      // Relay to other peers (full-mesh gossip)
-      gossipMessage({ kind: 'chat-message', message: data.message }, conn.peer);
-      break;
-    }
-    case 'messages-request': {
-      // Peer wants our chat history for this room
-      (async () => {
-        await ensureDb();
-        const roomMessages = _db.messages.filter((m) => m.roomCode === state.currentRoom?.code);
-        try { conn.send({ kind: 'messages-history', messages: roomMessages, from: state.peerId }); } catch {}
-      })();
-      break;
-    }
-    case 'messages-history': {
-      if (Array.isArray(data.messages)) {
-        (async () => {
-          await ensureDb();
-          let added = 0;
-          for (const m of data.messages) {
-            if (!_db.messages.some((x) => x.id === m.id)) { _db.messages.push(m); added++; }
-          }
-          if (added) { await saveDb(_db); refreshMessages(); }
-        })();
-      }
-      break;
-    }
-    case 'hangup': {
-      const call = state.peerConnections.get(conn.peer);
-      if (call) { try { call.close(); } catch {} state.peerConnections.delete(conn.peer); }
-      state.remoteStreams.delete(conn.peer);
-      updateRemoteVideo();
-      toast('Собеседник завершил звонок.');
-      break;
-    }
-    default:
-      console.debug('[data] unknown', data);
-  }
-}
-
-function gossipMessage(payload, exceptPeerId = null) {
-  for (const [pid, c] of state.dataConnections.entries()) {
-    if (pid === exceptPeerId) continue;
-    try { c.send(payload); } catch {}
-  }
-}
-
-// Hello handler: peer just connected, learn their display name
-function onHelloMessage(data, conn) {
-  if (data.displayName) {
-    conn._displayName = data.displayName;
-    renderPresence();
-  }
 }
 
 /* ============================================================
@@ -1104,75 +855,55 @@ async function ensureLocalMedia(video = true) {
 
 async function startCall() {
   if (!state.currentRoom) return toast('Сначала выберите комнату.', 'warn');
-  if (!state.peer) return toast('Сигналинг не подключён.', 'bad');
-  // Try to discover peers first (in case poll hasn't fired yet)
-  await discoverPeersFromDb();
-  if (state.dataConnections.size === 0) {
-    await ensureDb();
-    const room = _db.rooms.find((r) => r.code === state.currentRoom.code);
-    const livePeers = (room?.peers || []).filter((p) => {
-      if (p.peerId === state.peerId) return false;
-      const age = Date.now() - new Date(p.lastSeen || p.joinedAt).getTime();
-      return age < 90000;
-    });
-    if (livePeers.length === 0) {
-      return toast('В комнате нет других участников. Поделитесь ссылкой-приглашением.', 'warn');
-    }
-    for (const p of livePeers) {
-      if (!state.dataConnections.has(p.peerId)) connectToPeer(p.peerId, p.displayName);
-    }
-    for (let i = 0; i < 25 && state.dataConnections.size === 0; i++) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    if (state.dataConnections.size === 0) {
-      return toast('Не удалось подключиться. Нажмите кнопку обновления в меню комнат и попробуйте снова.', 'warn');
-    }
+  if (!state._room) return toast('Сигналинг не подключён.', 'bad');
+
+  const peers = state._room.getPeers();
+  const peerIds = Object.keys(peers);
+  if (peerIds.length === 0) {
+    return toast('В комнате нет других участников. Поделитесь ссылкой-приглашением.', 'warn');
   }
+
   await ensureLocalMedia(true).catch(async (e) => {
     toast(`${e.message} Пробую только микрофон.`, 'warn');
     return ensureLocalMedia(false);
   });
   if (!state.localStream) return toast('Нет доступа к камере/микрофону.', 'bad');
-  // Call every connected peer, with retry
+
+  // Send our stream to each peer via Trystero's addStream
   let initiated = 0;
-  for (const pid of state.dataConnections.keys()) {
-    if (state.peerConnections.has(pid)) continue;
-    let success = false;
-    for (let attempt = 0; attempt < 3 && !success; attempt++) {
-      try {
-        const call = state.peer.call(pid, state.localStream, { metadata: { displayName: state.user.displayName || state.user.username } });
-        attachCallHandlers(call);
-        success = true;
-        initiated++;
-      } catch (e) {
-        console.warn(`[call] attempt ${attempt + 1} failed`, e);
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
-      }
+  for (const peerId of peerIds) {
+    if (_stopStreams.has(peerId)) continue;
+    try {
+      const stop = state._room.addStream(state.localStream, peerId);
+      _stopStreams.set(peerId, stop);
+      initiated++;
+    } catch (e) {
+      console.warn('[call] failed for', peerId.slice(0, 12), e);
     }
-    if (!success) toast(`Не удалось дозвониться до участника. Попробуйте ещё раз.`, 'bad');
   }
+
   if (initiated) {
-    toast('Звонок отправлен. Ожидание ответа…', 'ok');
-    // Check if call actually connected within 10s
+    toast(`Звонок отправлен (${initiated}). Ожидание ответа…`, 'ok');
     setTimeout(() => {
-      if (state.peerConnections.size > 0 && state.remoteStreams.size === 0) {
-        toast('Соединение не установлено. Проверьте, что оба устройства в одной комнате.', 'warn');
+      if (state.remoteStreams.size === 0) {
+        toast('Соединение не установлено за 10с. Проверьте, что оба устройства в одной комнате.', 'warn');
       }
     }, 10000);
+  } else {
+    toast('Не удалось позвонить.', 'bad');
   }
 }
 
 function hangup(notify = true) {
-  if (notify) {
-    gossipMessage({ kind: 'hangup', from: state.peerId });
-  }
-  for (const call of state.peerConnections.values()) { try { call.close(); } catch {} }
-  state.peerConnections.clear();
+  if (notify) trysteroBroadcast({ kind: 'hangup' });
+  for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
+  _stopStreams.clear();
   state.remoteStreams.clear();
   $('#remoteVideo').srcObject = null;
   setStatus($('#peerStatus'), 'WebRTC: нет соединения', 'warn');
   $('#pcState').textContent = 'PC: нет данных';
   $('#iceState').textContent = 'ICE: нет данных';
+  updateConnectionIndicator();
 }
 
 function resetCall() {
@@ -1199,14 +930,15 @@ async function toggleCamera() {
   updateMediaControls();
 }
 async function checkConnection() {
+  const peers = state._room ? state._room.getPeers() : {};
   const bits = [];
   bits.push(`API ${state.health?.ok ? 'ok' : '?'}`);
-  bits.push(`peer ${state.peer ? 'ok' : 'off'}`);
+  bits.push(`trystero ${state.peer ? 'ok' : 'off'}`);
   bits.push(`room ${state.currentRoom ? state.currentRoom.code : 'none'}`);
-  bits.push(`host ${state.isRoomHost ? 'да' : 'нет'}`);
-  bits.push(`peers ${state.dataConnections.size}`);
+  bits.push(`peers ${Object.keys(peers).length}`);
+  bits.push(`known ${_peerNames.size}`);
   bits.push(`media ${state.localStream ? 'ok' : 'not started'}`);
-  bits.push(`calls ${state.peerConnections.size}`);
+  bits.push(`streams ${state.remoteStreams.size}`);
   toast(bits.join(' · '), 'info');
 }
 
@@ -1255,7 +987,7 @@ async function sendMessage() {
   $('#chatInput').value = '';
   await refreshMessages();
   // Gossip to peers (real-time push; db.json polling will catch it for others)
-  gossipMessage({ kind: 'chat-message', message: msg });
+  trysteroBroadcast({ kind: 'chat-message', message: msg });
 }
 async function editMessage(id) {
   await ensureDb();
@@ -1871,11 +1603,12 @@ function bind() {
   bindClick('#checkConnectionBtn', checkConnection);
   bindClick('#refreshPeersBtn', async () => {
     toast('Поиск участников…', 'info');
-    await discoverPeersFromDb();
-    await touchMyPeerInRoom();
-    await updateConnectionIndicator();
-    const n = state.dataConnections.size;
-    toast(n ? `Подключено к ${n} участникам.` : 'Участники не найдены. Подождите или поделитесь ссылкой.', n ? 'ok' : 'warn');
+    // Re-announce our presence so other peers see us
+    trysteroBroadcast({ kind: 'hello', displayName: state.user.displayName || state.user.username, username: state.user.username });
+    await new Promise((r) => setTimeout(r, 1500));
+    updateConnectionIndicator();
+    const n = _peerNames.size;
+    toast(n ? `Найдено участников: ${n}` : 'Участники не найдены. Подождите или поделитесь ссылкой.', n ? 'ok' : 'warn');
   });
   bindClick('#sendChatBtn', sendMessage);
   bindClick('#refreshChatBtn', refreshMessages);
@@ -1921,10 +1654,9 @@ async function init() {
   await checkHealth();
   await seedDefaultUsers();
   await loadMe();
-  // Start polling GitHub for db.json changes every 10s (chat / rooms / files / peer discovery)
+  // Start polling GitHub for db.json changes every 10s (chat / rooms / files sync)
   GH.startPolling(10000);
   GH.onDbChange((newDb) => {
-    // Update local cache + re-render relevant UI
     _db = newDb;
     if (state.user) {
       try { refreshRooms(); } catch {}
@@ -1932,21 +1664,16 @@ async function init() {
       try { refreshMail(); } catch {}
       try { refreshFiles(); } catch {}
       try { if (state.user.role === 'admin') refreshUsers(); } catch {}
-      // Discover new peers in the room (GitHub-based peer discovery)
-      try { discoverPeersFromDb(); } catch (e) { console.warn('discoverPeers', e); }
     }
   });
   // Periodic health check (rate limit display)
   setInterval(checkHealth, 60000);
-  // Keep my peer entry fresh in db.json every 30s (so others don't filter me out as stale)
-  setInterval(() => { touchMyPeerInRoom().catch(() => {}); }, 30000);
-  // Unregister my peer on page close / navigate away
+  // Leave Trystero room on page close
   window.addEventListener('beforeunload', () => {
-    // Use sendBeacon-style best-effort: fire and forget
-    unregisterMyPeerFromRoom().catch(() => {});
+    if (_room) { try { _room.leave(); } catch {} }
   });
   window.addEventListener('pagehide', () => {
-    unregisterMyPeerFromRoom().catch(() => {});
+    if (_room) { try { _room.leave(); } catch {} }
   });
   // Show invite hint on login screen if there's a room in URL
   const params = new URLSearchParams(location.search);
