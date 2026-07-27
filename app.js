@@ -46,34 +46,7 @@ const ICE_SERVERS = [
   { urls: 'stun:global.stun.twilio.com:3478' }
 ];
 
-/* ---------- IndexedDB (media storage) ---------- */
-const DB_NAME = 'call-static';
-const DB_VERSION = 1;
-const MEDIA_STORE = 'media';
-let _dbPromise = null;
-function db() {
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (e) => {
-      const idb = e.target.result;
-      if (!idb.objectStoreNames.contains(MEDIA_STORE)) {
-        const store = idb.createObjectStore(MEDIA_STORE, { keyPath: 'id' });
-        store.createIndex('by_type', 'type', { unique: false });
-        store.createIndex('by_createdAt', 'createdAt', { unique: false });
-      }
-    };
-    req.onsuccess = (e) => resolve(e.target.result);
-    req.onerror = () => reject(req.error);
-  });
-  return _dbPromise;
-}
-async function idbPut(record) { const d = await db(); return new Promise((res, rej) => { const tx = d.transaction(MEDIA_STORE, 'readwrite'); tx.objectStore(MEDIA_STORE).put(record); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); }); }
-async function idbGet(id) { const d = await db(); return new Promise((res, rej) => { const tx = d.transaction(MEDIA_STORE, 'readonly'); const r = tx.objectStore(MEDIA_STORE).get(id); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
-async function idbAll() { const d = await db(); return new Promise((res, rej) => { const tx = d.transaction(MEDIA_STORE, 'readonly'); const r = tx.objectStore(MEDIA_STORE).getAll(); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error); }); }
-async function idbByType(type) { const d = await db(); return new Promise((res, rej) => { const tx = d.transaction(MEDIA_STORE, 'readonly'); const idx = tx.objectStore(MEDIA_STORE).index('by_type'); const r = idx.getAll(type); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error); }); }
-async function idbDelete(id) { const d = await db(); return new Promise((res, rej) => { const tx = d.transaction(MEDIA_STORE, 'readwrite'); tx.objectStore(MEDIA_STORE).delete(id); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); }); }
-async function idbClear() { const d = await db(); return new Promise((res, rej) => { const tx = d.transaction(MEDIA_STORE, 'readwrite'); tx.objectStore(MEDIA_STORE).clear(); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); }); }
+/* ---------- IndexedDB shim removed — all media now lives in GitHub repo ---------- */
 
 /* ---------- Icon helpers ---------- */
 const iconClasses = {
@@ -190,67 +163,63 @@ async function verifyPassword(password, saltHex, expectedHash) {
 }
 
 /* ============================================================
- * localStorage persistence layer (DB shape mirrors the original)
+ * Storage layer — GitHub-backed via gh-store.js (GH global)
+ * localStorage is only used for session tokens (per-device).
  * ============================================================ */
-const LS_KEY = 'call-static-db-v1';
+const LS_KEY = 'call-static-db-v1'; // legacy, kept for migration
 const SESSION_KEY = 'call-static-session-v1';
 
-function loadDb() {
-  try { return JSON.parse(localStorage.getItem(LS_KEY)) || null; }
-  catch { return null; }
+// Cached DB loaded from GitHub
+let _db = null;
+
+// loadDb / saveDb / ensureDb are async now (hit GitHub)
+async function loadDb() {
+  const r = await GH.getDbCached();
+  _db = r?.db || null;
+  return _db;
 }
-function saveDb(db) {
-  db.updatedAt = new Date().toISOString();
-  localStorage.setItem(LS_KEY, JSON.stringify(db));
+// Synchronous accessor for places where we've already loaded _db
+function dbNow() { return _db; }
+async function saveDb(newDb) {
+  // Push to GitHub (debounced internally); update local cache
+  await GH.updateDb((cur) => {
+    Object.assign(cur, newDb);
+    return cur;
+  }, `update db @ ${new Date().toISOString()}`);
+  _db = (await GH.getDbCached()).db;
+  return _db;
 }
-function ensureDb() {
-  let d = loadDb();
-  if (!d) {
-    d = {
+async function ensureDb() {
+  if (!_db) await loadDb();
+  if (!_db) {
+    // Initialize a fresh db.json on GitHub
+    _db = {
       version: 1,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       settings: { title: 'Семейная связь', inviteBasePath: APP_URL('/') },
-      users: [],
-      rooms: [],
-      messages: [],
-      events: []
+      users: [], rooms: [], messages: [], media: [], events: []
     };
-    saveDb(d);
+    await saveDb(_db);
   }
-  return d;
+  return _db;
 }
 async function seedDefaultUsers() {
-  const d = ensureDb();
-  if (!d.users.some((u) => u.username === 'admin')) {
+  await ensureDb();
+  let changed = false;
+  if (!_db.users.some((u) => u.username === 'admin')) {
     const salt = newSalt();
     const hash = await hashPassword('admin', salt);
-    d.users.push({
-      id: randomId('usr_'),
-      username: 'admin',
-      displayName: 'Администратор',
-      role: 'admin',
-      salt, hash,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      disabled: false
-    });
+    _db.users.push({ id: randomId('usr_'), username: 'admin', displayName: 'Администратор', role: 'admin', salt, hash, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), disabled: false });
+    changed = true;
   }
-  if (!d.users.some((u) => u.username === 'guest')) {
+  if (!_db.users.some((u) => u.username === 'guest')) {
     const salt = newSalt();
     const hash = await hashPassword('guest', salt);
-    d.users.push({
-      id: randomId('usr_'),
-      username: 'guest',
-      displayName: 'Гость семьи',
-      role: 'guest',
-      salt, hash,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      disabled: false
-    });
+    _db.users.push({ id: randomId('usr_'), username: 'guest', displayName: 'Гость семьи', role: 'guest', salt, hash, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), disabled: false });
+    changed = true;
   }
-  saveDb(d);
+  if (changed) await saveDb(_db);
 }
 
 /* ---------- Session ---------- */
@@ -315,13 +284,14 @@ const state = {
 async function login() {
   const username = $('#loginUser').value.trim();
   const password = $('#loginPass').value;
-  const d = ensureDb();
-  const u = d.users.find((x) => x.username === username && !x.disabled);
+  toast('Проверка учетных данных…', 'info');
+  await ensureDb();
+  const u = _db.users.find((x) => x.username === username && !x.disabled);
   if (!u) { toast('Пользователь не найден.', 'bad'); return; }
   const ok = await verifyPassword(password, u.salt, u.hash);
   if (!ok) { toast('Неверный пароль.', 'bad'); return; }
   u.lastLoginAt = new Date().toISOString();
-  saveDb(d);
+  await saveDb(_db);
   state.user = { id: u.id, username: u.username, displayName: u.displayName, role: u.role };
   setSession(state.user);
   requireLoginUi();
@@ -342,9 +312,8 @@ function logout() {
 async function loadMe() {
   const s = getSession();
   if (!s) { state.user = null; requireLoginUi(); return; }
-  // Verify user still exists
-  const d = ensureDb();
-  const u = d.users.find((x) => x.id === s.userId && !x.disabled);
+  await ensureDb();
+  const u = _db.users.find((x) => x.id === s.userId && !x.disabled);
   if (!u) { clearSession(); state.user = null; requireLoginUi(); return; }
   state.user = { id: u.id, username: u.username, displayName: u.displayName, role: u.role };
   requireLoginUi();
@@ -381,14 +350,15 @@ function tab(name) { $$('.tab').forEach((b) => b.classList.toggle('active', b.da
  * ============================================================ */
 async function checkHealth() {
   try {
-    // Verify localStorage & IndexedDB are writable
-    const testKey = '__call_health_test__';
-    localStorage.setItem(testKey, '1'); localStorage.removeItem(testKey);
-    state.health = { ok: true, storageWritable: true, ffmpegAvailable: false, maxUploadMb: 2048 };
-    setStatus($('#apiStatus'), `API: ok · storage ok · FFmpeg нет · upload ${state.health.maxUploadMb}MB`, 'ok');
-    $('#uploadLimit').textContent = `до ${state.health.maxUploadMb} MB`;
+    const h = await GH.health();
+    if (!h.ok) throw new Error(h.message || 'GH repo unreachable');
+    state.health = { ok: true, storageWritable: true, ffmpegAvailable: false, maxUploadMb: h.maxUploadMb, gh: h };
+    setStatus($('#apiStatus'), `API: ok · ${h.repo} · remaining ${h.remaining}/${h.limit} · upload ${h.maxUploadMb}MB`, 'ok');
+    $('#uploadLimit').textContent = `до ${h.maxUploadMb} MB`;
   } catch (e) {
+    state.health = { ok: false, storageWritable: false, ffmpegAvailable: false, maxUploadMb: 100 };
     setStatus($('#apiStatus'), `API: ошибка · ${e.message}`, 'bad');
+    $('#uploadLimit').textContent = `до 100 MB`;
   }
 }
 
@@ -397,12 +367,13 @@ async function checkHealth() {
  * ============================================================ */
 async function refreshAll() {
   if (!state.user) return;
+  await ensureDb();
   await Promise.allSettled([refreshRooms(), refreshMessages(), refreshMail(), refreshFiles(), refreshUsers()]);
 }
 async function refreshRooms() {
   if (!state.user) return;
-  const d = ensureDb();
-  state.rooms = d.rooms.filter((r) => r.ownerId === state.user.id || r.guestUserIds?.includes(state.user.id) || r.isPublic);
+  await ensureDb();
+  state.rooms = _db.rooms.filter((r) => r.ownerId === state.user.id || r.guestUserIds?.includes(state.user.id) || r.isPublic);
   renderRooms();
 }
 function renderRooms() {
@@ -427,10 +398,9 @@ function renderRooms() {
 }
 async function createRoom() {
   const title = $('#roomTitle').value.trim() || 'Семейный звонок';
-  const d = ensureDb();
-  // Ensure code is unique
+  await ensureDb();
   let code;
-  for (let tries = 0; tries < 8; tries++) { code = randomCode(); if (!d.rooms.some((r) => r.code === code)) break; }
+  for (let tries = 0; tries < 8; tries++) { code = randomCode(); if (!_db.rooms.some((r) => r.code === code)) break; }
   const room = {
     id: randomId('room_'),
     code,
@@ -444,8 +414,9 @@ async function createRoom() {
     updatedAt: new Date().toISOString(),
     lastJoinAt: null
   };
-  d.rooms.unshift(room);
-  saveDb(d);
+  toast('Создание комнаты…', 'info');
+  _db.rooms.unshift(room);
+  await saveDb(_db);
   state.rooms.unshift(room);
   await selectRoom(room.id, room.inviteToken);
   toast('Комната создана.', 'ok');
@@ -485,10 +456,9 @@ async function joinRoomByCodeManual() {
   const code = ($('#joinRoomCode')?.value || '').trim();
   const inviteToken = ($('#joinRoomToken')?.value || '').trim();
   if (!code) return toast('Введите код комнаты.', 'warn');
-  const d = ensureDb();
-  let room = d.rooms.find((r) => r.code.toUpperCase() === code.toUpperCase());
+  await ensureDb();
+  let room = _db.rooms.find((r) => r.code.toUpperCase() === code.toUpperCase());
   if (!room) {
-    // Create a "stub" room representing one we joined via code
     room = {
       id: randomId('room_'),
       code: code.toUpperCase(),
@@ -503,8 +473,8 @@ async function joinRoomByCodeManual() {
       lastJoinAt: new Date().toISOString(),
       joinedByCode: true
     };
-    d.rooms.unshift(room);
-    saveDb(d);
+    _db.rooms.unshift(room);
+    await saveDb(_db);
   }
   if (!state.rooms.some((x) => x.id === room.id)) state.rooms.unshift(room);
   state.currentInviteToken = inviteToken || room.inviteToken;
@@ -514,9 +484,9 @@ async function joinRoomByCodeManual() {
 }
 async function deleteRoom(id) {
   if (!confirm('Удалить комнату? Активный звонок в ней закончится.')) return;
-  const d = ensureDb();
-  d.rooms = d.rooms.filter((r) => r.id !== id);
-  saveDb(d);
+  await ensureDb();
+  _db.rooms = _db.rooms.filter((r) => r.id !== id);
+  await saveDb(_db);
   state.rooms = state.rooms.filter((r) => r.id !== id);
   if (state.currentRoom?.id === id) leaveRoom();
   renderRooms();
@@ -551,8 +521,8 @@ async function autoJoinFromUrl() {
   return await joinByCode(code, inviteToken);
 }
 async function joinByCode(code, inviteToken) {
-  const d = ensureDb();
-  let room = d.rooms.find((r) => r.code.toUpperCase() === code.toUpperCase());
+  await ensureDb();
+  let room = _db.rooms.find((r) => r.code.toUpperCase() === code.toUpperCase());
   if (!room) {
     room = {
       id: randomId('room_'),
@@ -568,8 +538,8 @@ async function joinByCode(code, inviteToken) {
       lastJoinAt: new Date().toISOString(),
       joinedByCode: true
     };
-    d.rooms.unshift(room);
-    saveDb(d);
+    _db.rooms.unshift(room);
+    await saveDb(_db);
   }
   if (!state.rooms.some((x) => x.id === room.id)) state.rooms.unshift(room);
   state.currentInviteToken = inviteToken || room.inviteToken;
@@ -913,32 +883,37 @@ function onDataMessage(data, conn) {
     }
     case 'chat-message': {
       // Incoming chat message from a peer
-      const d = ensureDb();
-      // Deduplicate by id
-      if (d.messages.some((m) => m.id === data.message.id)) break;
-      d.messages.push(data.message);
-      saveDb(d);
-      refreshMessages();
+      (async () => {
+        await ensureDb();
+        // Deduplicate by id
+        if (_db.messages.some((m) => m.id === data.message.id)) return;
+        _db.messages.push(data.message);
+        await saveDb(_db);
+        refreshMessages();
+      })();
       // Relay to other peers (full-mesh gossip)
       gossipMessage({ kind: 'chat-message', message: data.message }, conn.peer);
       break;
     }
     case 'messages-request': {
       // Peer wants our chat history for this room
-      const d = ensureDb();
-      const roomMessages = d.messages.filter((m) => m.roomCode === state.currentRoom?.code);
-      // Send in chunks to avoid message size limits
-      try { conn.send({ kind: 'messages-history', messages: roomMessages, from: state.peerId }); } catch {}
+      (async () => {
+        await ensureDb();
+        const roomMessages = _db.messages.filter((m) => m.roomCode === state.currentRoom?.code);
+        try { conn.send({ kind: 'messages-history', messages: roomMessages, from: state.peerId }); } catch {}
+      })();
       break;
     }
     case 'messages-history': {
       if (Array.isArray(data.messages)) {
-        const d = ensureDb();
-        let added = 0;
-        for (const m of data.messages) {
-          if (!d.messages.some((x) => x.id === m.id)) { d.messages.push(m); added++; }
-        }
-        if (added) { saveDb(d); refreshMessages(); }
+        (async () => {
+          await ensureDb();
+          let added = 0;
+          for (const m of data.messages) {
+            if (!_db.messages.some((x) => x.id === m.id)) { _db.messages.push(m); added++; }
+          }
+          if (added) { await saveDb(_db); refreshMessages(); }
+        })();
       }
       break;
     }
@@ -1090,12 +1065,12 @@ async function checkConnection() {
 }
 
 /* ============================================================
- * Chat (localStorage + PeerJS gossip)
+ * Chat (GitHub-backed db.json + PeerJS gossip for instant sync)
  * ============================================================ */
 async function refreshMessages() {
   if (!state.user) return;
-  const d = ensureDb();
-  const all = d.messages.filter((m) => !m.roomCode || m.roomCode === state.currentRoom?.code || !state.currentRoom);
+  await ensureDb();
+  const all = _db.messages.filter((m) => !m.roomCode || m.roomCode === state.currentRoom?.code || !state.currentRoom);
   renderMessages(all);
 }
 function renderMessages(messages) {
@@ -1128,30 +1103,30 @@ async function sendMessage() {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
-  const d = ensureDb();
-  d.messages.push(msg);
-  saveDb(d);
+  await ensureDb();
+  _db.messages.push(msg);
+  await saveDb(_db);
   $('#chatInput').value = '';
   await refreshMessages();
-  // Gossip to peers
+  // Gossip to peers (real-time push; db.json polling will catch it for others)
   gossipMessage({ kind: 'chat-message', message: msg });
 }
 async function editMessage(id) {
-  const d = ensureDb();
-  const m = d.messages.find((x) => x.id === id);
+  await ensureDb();
+  const m = _db.messages.find((x) => x.id === id);
   if (!m) return;
   const text = prompt('Изменить сообщение:', m.text);
   if (text === null) return;
   m.text = text;
   m.updatedAt = new Date().toISOString();
-  saveDb(d);
+  await saveDb(_db);
   await refreshMessages();
 }
 async function deleteMessage(id) {
   if (!confirm('Удалить сообщение?')) return;
-  const d = ensureDb();
-  d.messages = d.messages.filter((x) => x.id !== id);
-  saveDb(d);
+  await ensureDb();
+  _db.messages = _db.messages.filter((x) => x.id !== id);
+  await saveDb(_db);
   await refreshMessages();
 }
 
@@ -1212,7 +1187,9 @@ function stopRecording() {
 }
 
 /* ============================================================
- * Files / media storage in IndexedDB
+ * Files / media storage in GitHub repo (call-data)
+ *   - File blob -> files/<media_id> (base64 via Contents API)
+ *   - Metadata  -> db.json media array
  * ============================================================ */
 function kindForFile(file) {
   const t = (file.type || '').toLowerCase();
@@ -1241,17 +1218,23 @@ async function saveMediaBlob(blob, type, note, originalName, mode) {
     updatedAt: new Date().toISOString(),
     downloadCount: 0,
     lastDownloadedByName: null,
-    lastDownloadedAt: null,
-    blob
+    lastDownloadedAt: null
   };
-  await idbPut(record);
-  toast('Сохранено локально.', 'ok');
+  // 1. Upload blob to files/<id>
+  toast(`Загрузка ${originalName}…`, 'info');
+  await GH.putFile(id, blob, `upload ${originalName} (${type})`);
+  // 2. Add metadata to db.json
+  await ensureDb();
+  _db.media.push(record);
+  await saveDb(_db);
+  toast('Сохранено в GitHub.', 'ok');
 }
 async function uploadFiles() {
   const files = Array.from($('#fileInput').files || []);
   if (!files.length) return toast('Выберите файл.', 'warn');
   const note = $('#fileNote').value.trim();
   for (const file of files) {
+    if (file.size > 100 * 1024 * 1024) { toast(`${file.name}: больше 100 MB. GitHub не позволит.`, 'bad'); continue; }
     try {
       await saveMediaBlob(file, 'file', note, file.name);
       toast(`Загружено: ${file.name}`, 'ok');
@@ -1264,13 +1247,15 @@ async function uploadFiles() {
 }
 async function refreshMail() {
   if (!state.user) return;
-  try { const items = await idbByType('mail'); renderMediaList($('#mailList'), items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))); }
-  catch (e) { toast(`Mail: ${e.message}`, 'bad'); }
+  await ensureDb();
+  const items = _db.media.filter((m) => m.type === 'mail' && !m.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  renderMediaList($('#mailList'), items);
 }
 async function refreshFiles() {
   if (!state.user) return;
-  try { const items = await idbByType('file'); renderMediaList($('#filesList'), items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))); }
-  catch (e) { toast(`Файлы: ${e.message}`, 'bad'); }
+  await ensureDb();
+  const items = _db.media.filter((m) => m.type === 'file' && !m.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  renderMediaList($('#filesList'), items);
 }
 function kindIcon(kind) { return { video: 'file-video', audio: 'file-audio', image: 'file-image', pdf: 'file-pdf', text: 'file-lines', other: 'file' }[kind] || 'file'; }
 function downloadStats(m) {
@@ -1283,10 +1268,8 @@ function downloadStats(m) {
 function renderMediaList(box, items) {
   if (!items.length) { box.className = 'media-list empty'; box.textContent = 'Пока пусто.'; return; }
   box.className = 'media-list';
-  // Create object URLs for each item (cached on the record)
-  box.innerHTML = items.map((m) => {
-    if (!m._url) m._url = URL.createObjectURL(m.blob);
-    return `
+  // Render with a placeholder for the file URL; lazily fetch on click/preview
+  box.innerHTML = items.map((m) => `
     <div class="media-item" data-id="${m.id}">
       <div class="media-top">
         <div class="media-kind"><span data-icon="${kindIcon(m.kind)}"></span></div>
@@ -1297,66 +1280,97 @@ function renderMediaList(box, items) {
         </div>
       </div>
       ${m.note ? `<div class="media-note">${escapeHtml(m.note)}</div>` : ''}
-      ${inlinePlayer(m)}
+      <div class="media-placeholder" data-id="${m.id}"><span class="meta">Нажмите «Открыть» для просмотра</span></div>
       <div class="media-actions">
         <button class="small icon-action preview-media" data-id="${m.id}" title="Открыть" aria-label="Открыть"><span data-icon="eye"></span></button>
-        <a class="button small icon-action" href="${m._url}" download="${escapeHtml(m.originalName)}" data-id="${m.id}" title="Скачать оригинал" aria-label="Скачать оригинал"><span data-icon="download"></span></a>
+        <button class="small icon-action download-media" data-id="${m.id}" title="Скачать оригинал" aria-label="Скачать оригинал"><span data-icon="download"></span></button>
         <button class="small icon-action danger delete-media" data-id="${m.id}" title="Удалить" aria-label="Удалить"><span data-icon="trash"></span></button>
       </div>
-    </div>`;
-  }).join('');
+    </div>`).join('');
   renderIcons(box);
-  // Track downloads
-  box.querySelectorAll('a[download]').forEach((a) => a.onclick = async () => {
-    const rec = items.find((x) => x.id === a.dataset.id);
-    if (rec) { rec.downloadCount = (rec.downloadCount || 0) + 1; rec.lastDownloadedByName = state.user?.displayName || state.user?.username; rec.lastDownloadedAt = new Date().toISOString(); await idbPut(rec); }
-  });
   box.querySelectorAll('.preview-media').forEach((b) => b.onclick = () => openPreview(items.find((m) => m.id === b.dataset.id)));
+  box.querySelectorAll('.download-media').forEach((b) => b.onclick = () => downloadMedia(items.find((m) => m.id === b.dataset.id)));
   box.querySelectorAll('.delete-media').forEach((b) => b.onclick = () => deleteMedia(b.dataset.id));
 }
-function inlinePlayer(m) {
-  if (!m._url) m._url = URL.createObjectURL(m.blob);
-  if (m.kind === 'audio') return `<div class="media-player"><audio controls src="${m._url}"></audio></div>`;
-  if (m.kind === 'video') return `<div class="media-player"><video controls playsinline src="${m._url}"></video></div>`;
-  if (m.kind === 'image') return `<div class="media-player"><img src="${m._url}" alt="${escapeHtml(m.originalName)}" loading="lazy" style="max-width:100%;border-radius:14px"></div>`;
-  if (m.kind === 'pdf') return `<div class="media-player"><iframe src="${m._url}"></iframe></div>`;
-  return '';
+// Inline player is now async-loaded into the placeholder div
+async function inlinePlayerInto(m, holder) {
+  if (!holder) return;
+  holder.innerHTML = '<span class="meta">Загрузка…</span>';
+  try {
+    const url = await GH.getFileUrl(m.id, m.mime);
+    if (!url) { holder.innerHTML = '<span class="meta warn-text">Файл не найден.</span>'; return; }
+    m._url = url;
+    if (m.kind === 'audio') holder.innerHTML = `<div class="media-player"><audio controls src="${url}"></audio></div>`;
+    else if (m.kind === 'video') holder.innerHTML = `<div class="media-player"><video controls playsinline src="${url}"></video></div>`;
+    else if (m.kind === 'image') holder.innerHTML = `<div class="media-player"><img src="${url}" alt="${escapeHtml(m.originalName)}" loading="lazy" style="max-width:100%;border-radius:14px"></div>`;
+    else if (m.kind === 'pdf') holder.innerHTML = `<div class="media-player"><iframe src="${url}"></iframe></div>`;
+    else holder.innerHTML = '';
+  } catch (e) { holder.innerHTML = `<span class="meta warn-text">Ошибка: ${escapeHtml(e.message)}</span>`; }
 }
 async function openPreview(m) {
   if (!m) return;
-  if (!m._url) m._url = URL.createObjectURL(m.blob);
   $('#previewTitle').textContent = m.originalName;
-  $('#previewDownload').href = m._url;
-  $('#previewDownload').setAttribute('download', m.originalName);
   const body = $('#previewBody');
-  body.innerHTML = '';
-  if (m.kind === 'video') body.innerHTML = `<video controls autoplay playsinline src="${m._url}"></video>`;
-  else if (m.kind === 'audio') body.innerHTML = `<audio controls autoplay src="${m._url}"></audio>`;
-  else if (m.kind === 'image') body.innerHTML = `<img src="${m._url}" alt="${escapeHtml(m.originalName)}" />`;
-  else if (m.kind === 'pdf') body.innerHTML = `<iframe src="${m._url}"></iframe>`;
-  else if (m.kind === 'text') {
-    try { const txt = await m.blob.text(); body.innerHTML = `<pre>${escapeHtml(txt.slice(0, 200000))}</pre>`; }
-    catch { body.textContent = 'Не удалось прочитать текст.'; }
-  } else {
-    body.innerHTML = `<p>Этот формат лучше скачать оригиналом.</p>`;
-  }
+  body.innerHTML = '<p class="meta">Загрузка из GitHub…</p>';
   $('#previewDialog').showModal();
+  try {
+    const url = m._url || await GH.getFileUrl(m.id, m.mime);
+    if (!url) { body.innerHTML = '<p>Файл не найден.</p>'; return; }
+    m._url = url;
+    $('#previewDownload').href = url;
+    $('#previewDownload').setAttribute('download', m.originalName);
+    body.innerHTML = '';
+    if (m.kind === 'video') body.innerHTML = `<video controls autoplay playsinline src="${url}"></video>`;
+    else if (m.kind === 'audio') body.innerHTML = `<audio controls autoplay src="${url}"></audio>`;
+    else if (m.kind === 'image') body.innerHTML = `<img src="${url}" alt="${escapeHtml(m.originalName)}" />`;
+    else if (m.kind === 'pdf') body.innerHTML = `<iframe src="${url}"></iframe>`;
+    else if (m.kind === 'text') {
+      try {
+        const r = await fetch(url, { credentials: 'same-origin' });
+        const txt = await r.text();
+        body.innerHTML = `<pre>${escapeHtml(txt.slice(0, 200000))}</pre>`;
+      } catch { body.textContent = 'Не удалось прочитать текст.'; }
+    } else {
+      body.innerHTML = `<p>Этот формат лучше скачать оригиналом.</p>`;
+    }
+  } catch (e) { body.innerHTML = `<p>Ошибка: ${escapeHtml(e.message)}</p>`; }
+}
+async function downloadMedia(m) {
+  if (!m) return;
+  toast(`Скачивание ${m.originalName}…`, 'info');
+  try {
+    const url = m._url || await GH.getFileUrl(m.id, m.mime);
+    if (!url) { toast('Файл не найден.', 'bad'); return; }
+    const a = document.createElement('a');
+    a.href = url; a.download = m.originalName; a.style.display = 'none';
+    document.body.appendChild(a); a.click(); a.remove();
+    // Track download
+    await ensureDb();
+    const rec = _db.media.find((x) => x.id === m.id);
+    if (rec) { rec.downloadCount = (rec.downloadCount || 0) + 1; rec.lastDownloadedByName = state.user?.displayName || state.user?.username; rec.lastDownloadedAt = new Date().toISOString(); await saveDb(_db); }
+  } catch (e) { toast(`Скачивание: ${e.message}`, 'bad'); }
 }
 async function deleteMedia(id) {
   if (!confirm('Удалить запись из приложения?')) return;
-  await idbDelete(id);
+  await ensureDb();
+  const rec = _db.media.find((x) => x.id === id);
+  if (!rec) return;
+  // Soft-delete metadata, attempt blob deletion (may fail if file already gone)
+  rec.deletedAt = new Date().toISOString();
+  await saveDb(_db);
+  try { await GH.deleteFile(id, `delete ${rec.originalName}`); } catch (e) { console.warn('blob delete failed', e); }
   await refreshMail();
   await refreshFiles();
   toast('Удалено.', 'ok');
 }
 
 /* ============================================================
- * Admin: user management (localStorage)
+ * Admin: user management (GitHub-backed db.json)
  * ============================================================ */
 async function refreshUsers() {
   if (!state.user || state.user.role !== 'admin') return;
-  const d = ensureDb();
-  state.users = d.users;
+  await ensureDb();
+  state.users = _db.users;
   renderUsers();
 }
 function renderUsers() {
@@ -1384,13 +1398,13 @@ async function changeUserPassword(id) {
   const input = $(`.user-pass-input[data-id="${CSS.escape(id)}"]`);
   const password = input?.value || '';
   if (!password) return toast('Введите новый пароль.', 'warn');
-  const d = ensureDb();
-  const u = d.users.find((x) => x.id === id);
+  await ensureDb();
+  const u = _db.users.find((x) => x.id === id);
   if (!u) return;
   u.salt = newSalt();
   u.hash = await hashPassword(password, u.salt);
   u.updatedAt = new Date().toISOString();
-  saveDb(d);
+  await saveDb(_db);
   if (input) input.value = '';
   await refreshUsers();
   toast('Пароль изменён.', 'ok');
@@ -1401,11 +1415,11 @@ async function addUser() {
   const password = $('#newPassword').value;
   const role = $('#newRole').value;
   if (!username || !password) return toast('Логин и пароль обязательны.', 'warn');
-  const d = ensureDb();
-  if (d.users.some((u) => u.username === username)) return toast('Логин уже занят.', 'bad');
+  await ensureDb();
+  if (_db.users.some((u) => u.username === username)) return toast('Логин уже занят.', 'bad');
   const salt = newSalt();
   const hash = await hashPassword(password, salt);
-  d.users.push({
+  _db.users.push({
     id: randomId('usr_'),
     username, displayName: displayName || username, role,
     salt, hash,
@@ -1413,14 +1427,14 @@ async function addUser() {
     updatedAt: new Date().toISOString(),
     disabled: false
   });
-  saveDb(d);
+  await saveDb(_db);
   $('#newUserName').value = $('#newDisplayName').value = $('#newPassword').value = '';
   await refreshUsers();
   toast('Пользователь добавлен.', 'ok');
 }
 async function editUser(id) {
-  const d = ensureDb();
-  const u = d.users.find((x) => x.id === id);
+  await ensureDb();
+  const u = _db.users.find((x) => x.id === id);
   if (!u) return;
   const displayName = prompt('Имя на экране:', u.displayName || u.username);
   if (displayName === null) return;
@@ -1431,26 +1445,33 @@ async function editUser(id) {
   u.role = (role === 'admin') ? 'admin' : 'guest';
   if (password) { u.salt = newSalt(); u.hash = await hashPassword(password, u.salt); }
   u.updatedAt = new Date().toISOString();
-  saveDb(d);
+  await saveDb(_db);
   await refreshUsers();
   toast('Пользователь обновлён.', 'ok');
 }
 async function deleteUser(id) {
   if (!confirm('Удалить пользователя?')) return;
-  const d = ensureDb();
-  d.users = d.users.filter((u) => u.id !== id);
-  saveDb(d);
+  await ensureDb();
+  _db.users = _db.users.filter((u) => u.id !== id);
+  await saveDb(_db);
   await refreshUsers();
   toast('Пользователь удалён.', 'ok');
 }
 
 async function resetAllData() {
-  if (!confirm('Удалить ВСЕ локальные данные (пользователи, комнаты, сообщения, файлы)?')) return;
-  if (!confirm('Точно? Это действие необратимо.')) return;
-  localStorage.removeItem(LS_KEY);
-  sessionStorage.removeItem(SESSION_KEY);
-  localStorage.removeItem(SESSION_KEY + '-long');
-  await idbClear();
+  if (!confirm('Удалить ВСЕ данные в GitHub (пользователи, комнаты, сообщения, файлы)?')) return;
+  if (!confirm('Точно? Это действие необратимо и затронет все устройства.')) return;
+  // Clear session on this device
+  clearSession();
+  // Reset db.json to empty
+  _db = {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    settings: { title: 'Семейная связь' },
+    users: [], rooms: [], messages: [], media: [], events: []
+  };
+  await saveDb(_db);
   await seedDefaultUsers();
   state.user = null;
   state.rooms = [];
@@ -1458,8 +1479,7 @@ async function resetAllData() {
   disconnectPeer();
   resetCall();
   requireLoginUi();
-  await refreshAll();
-  toast('Локальные данные сброшены.', 'ok');
+  toast('Данные сброшены.', 'ok');
 }
 
 /* ---------- File picker text ---------- */
@@ -1563,6 +1583,21 @@ async function init() {
   await checkHealth();
   await seedDefaultUsers();
   await loadMe();
+  // Start polling GitHub for db.json changes every 10s (chat / rooms / files sync)
+  GH.startPolling(10000);
+  GH.onDbChange((newDb) => {
+    // Update local cache + re-render relevant UI
+    _db = newDb;
+    if (state.user) {
+      // Don't refresh if user is mid-action (e.g. typing in chat) — only refresh lists
+      try { refreshRooms(); } catch {}
+      try { refreshMessages(); } catch {}
+      try { refreshMail(); } catch {}
+      try { refreshFiles(); } catch {}
+      try { if (state.user.role === 'admin') refreshUsers(); } catch {}
+    }
+  });
+  // Periodic health check (rate limit display)
   setInterval(checkHealth, 60000);
   // Show invite hint on login screen if there's a room in URL
   const params = new URLSearchParams(location.search);

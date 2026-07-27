@@ -1,53 +1,69 @@
-# Семейная связь — static GitHub Pages edition
+# Семейная связь — static GitHub Pages edition with synced storage
 
 A private family video-call, chat, audio/video mail, file storage, and admin
-app — re-architected from the original Node.js + Socket.io + Express package
-into a **pure static site** that runs entirely in the browser on GitHub Pages.
+app — runs entirely in the browser on GitHub Pages, with **synced storage**
+across all devices via a separate private GitHub repo.
 
-Public URL: <https://insightanalyticsca.github.io/call/>
+- **App URL**: <https://insightanalyticsca.github.io/call/>
+- **App repo** (public): <https://github.com/insightanalyticsca/call>
+- **Data repo** (private): <https://github.com/insightanalyticsca/call-data>
 
-## What's inside
+## Architecture (one place: GitHub)
 
 ```
-index.html              Login lander + mobile app shell (5 sections)
+┌─────────────────────────────────────────┐    ┌─────────────────────────────┐
+│  Browser (any device)                   │    │  GitHub                     │
+│                                         │    │                             │
+│  index.html / app.js / gh-store.js      │    │  ┌─ insightanalyticsca/call │
+│         │                               │    │  │   (public, hosts app)    │
+│         │  PAT-authenticated fetch()     │───►│  │   served by Pages       │
+│         │                               │    │  │                          │
+│         ▼                               │    │  └─ insightanalyticsca/    │
+│  gh-store.js                            │    │      call-data (private)   │
+│    • getDb / updateDb  (db.json)        │◄──►│      ├─ db.json            │
+│    • putFile / getFile (files/<id>)     │    │      │   users, rooms,     │
+│    • poll every 10s                     │    │      │   messages, media   │
+│                                         │    │      └─ files/<media_id>   │
+│  PeerJS broker (0.peerjs.com)           │    │          base64 blobs      │
+│    • WebRTC video signaling             │    │                             │
+│    • data-channel chat gossip           │    └─────────────────────────────┘
+└─────────────────────────────────────────┘
+```
+
+## Files in this repo
+
+```
+index.html              Login lander + mobile app shell
 styles.css              Mobile-first dark UI (preserved from original)
 app.js                  All logic — auth, rooms, WebRTC, chat, mail, files, admin
-service-worker.js       PWA offline shell (same-origin cache)
-manifest.webmanifest    PWA manifest (installable)
+gh-store.js             GitHub Contents API wrapper (the new storage layer)
+service-worker.js       PWA offline shell
+manifest.webmanifest    PWA manifest
 icon.svg                App icon
 .nojekyll               Disables Jekyll on GitHub Pages
 ```
 
-## How it works (no backend)
+## How storage works
 
-| Feature              | Implementation                                                                 |
-|----------------------|--------------------------------------------------------------------------------|
-| Auth                 | PBKDF2 (Web Crypto API) + `localStorage`. Default `admin/admin`, `guest/guest` |
-| Sessions             | 14-day persistent session in `localStorage` + mirror in `sessionStorage`       |
-| Rooms                | `localStorage` + invite URL `?room=CODE&invite=TOKEN`                          |
-| WebRTC signaling     | **PeerJS** free public broker (`0.peerjs.com`) — no server required            |
-| Video calls          | Full-mesh WebRTC via PeerJS media connections                                  |
-| Chat                 | `localStorage` history + PeerJS data-channel gossip sync                       |
-| Audio/video mail     | `MediaRecorder` → Blob → **IndexedDB**                                         |
-| File uploads         | File input → Blob → **IndexedDB**                                              |
-| Preview / download   | Object URLs created from IndexedDB Blobs                                       |
-| Admin (user mgmt)    | `localStorage` user records; admin can create/edit/delete users & passwords    |
+| What | Where | Synced across devices? |
+|---|---|---|
+| Users, rooms, chat, media metadata | `db.json` in `call-data` repo | ✅ Yes |
+| Uploaded files, recorded mail | `files/<media_id>` in `call-data` repo (base64) | ✅ Yes |
+| Session token | `localStorage` on each device | ❌ No (per-device login) |
+| WebRTC video signaling | PeerJS public broker | Real-time |
+| Chat instant push | PeerJS data channel | Real-time, plus 10s poll backup |
 
-## Architecture notes
+## Trade-offs
 
-- The **first user to join a room** registers a deterministic PeerJS ID
-  (`iac-call-v1-room-<CODE>`) and becomes the room "host". They accept incoming
-  data + media connections from anyone joining with that code.
-- **Subsequent users** connect to the host, request the presence list, then
-  establish direct peer-to-peer connections with everyone in the room
-  (full mesh — fine for the typical 2–4 person family call).
-- If the host leaves, the remaining peer automatically retries the host ID
-  and becomes the new host.
-- Chat messages are gossiped across the data-channel mesh and stored locally
-  in each browser. Late joiners request history from the host.
-- Uploaded files and recorded messages live in **IndexedDB** on the device
-  that created them. They are NOT synced to other devices (no server).
-  They remain available across sessions on the same browser.
+- **PAT is in client JS** — anyone using the site can extract it from devtools.
+  Use a **fine-grained PAT scoped only to `call-data`** for safety.
+  The classic `ghp_…` PAT embedded here has broader scope — rotate it after setup.
+- **100 MB per-file hard limit** (GitHub's limit). Larger files are rejected with a toast.
+- **Saves lag** — each chat message or file upload = a git commit (~1–3 s round-trip).
+  For chat, PeerJS data channel gives instant push to peers who are online; the
+  10-second poll picks up changes from offline devices.
+- **5000 GitHub API req/hour** — fine for a family. Heavy use may hit the limit.
+- **Rate limit display** — the `API: …` status pill shows remaining requests.
 
 ## Defaults
 
@@ -56,25 +72,26 @@ icon.svg                App icon
 
 Change these in the **Админ** tab after first login.
 
-## Limitations vs. the original Node.js app
-
-- Files and recordings are per-device (no server sync). To share a file with
-  another device, download it and send it via the room's chat or another
-  channel.
-- FFmpeg MP4 transcoding is not available (no server). MOV/MPG/MPEG files
-  play directly via the browser's native player; if the browser can't decode
-  them, download the original.
-- WebRTC depends on the free public PeerJS broker. For better reliability
-  in production, deploy your own PeerJS server and update `app.js`.
-
 ## Local development
 
 Just open `index.html` over HTTPS or via `localhost` — no build step.
 
 ```bash
-# Optional: serve locally with Python
 python3 -m http.server 8080
 # Visit http://localhost:8080/
 ```
 
 Camera/microphone require a secure context (HTTPS or localhost).
+
+## Rotation: switch to a fine-grained PAT (recommended)
+
+1. Go to <https://github.com/settings/personal-access-tokens/new>
+2. Resource owner: `insightanalyticsca`
+3. Repository access: **Only select repositories** → `call-data`
+4. Permissions → Repository permissions:
+   - **Contents**: Read and write
+   - (Everything else: No access)
+5. Generate token, copy it
+6. Edit `gh-store.js` → replace `token:` value
+7. Commit & push to `call` repo
+8. Revoke the old classic PAT at <https://github.com/settings/tokens>

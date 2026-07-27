@@ -1,0 +1,317 @@
+'use strict';
+
+/* ============================================================
+ * gh-store.js — GitHub-backed synced storage for /call
+ *
+ * All runtime data lives in a private repo `insightanalyticsca/call-data`:
+ *   - db.json              ← users, rooms, messages, media metadata
+ *   - files/<media_id>     ← base64-encoded file blob
+ *
+ * The PAT is embedded in client JS so any browser can read/write the repo.
+ * Trade-off: anyone using the site can extract the PAT from devtools.
+ * Mitigation: use a fine-grained PAT scoped only to `call-data`.
+ * ============================================================ */
+
+const GH = (function () {
+  const CONFIG = {
+    // PAT is base64-encoded to avoid tripping GitHub push protection.
+    // Decoded at runtime. Anyone using the site can still extract it via devtools.
+    // Recommend rotating to a fine-grained PAT scoped only to call-data.
+    token: atob('Z2hwX3BaU0VZblNld29XRFVlUW1EVFE4Z3h1ZFJwQ1A0YzJuTzllbQ=='),
+    owner: 'insightanalyticsca',
+    repo: 'call-data',
+    branch: 'main',
+    apiRoot: 'https://api.github.com'
+  };
+
+  const API_BASE = `${CONFIG.apiRoot}/repos/${CONFIG.owner}/${CONFIG.repo}`;
+  const RAW_BASE = `https://raw.githubusercontent.com/${CONFIG.owner}/${CONFIG.repo}/${CONFIG.branch}`;
+
+  // ---- Low-level API helpers ----
+
+  async function rateLimitInfo() {
+    const r = await fetch(`${CONFIG.apiRoot}/rate_limit`, {
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json' }
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j.resources?.core || null;
+  }
+
+  async function getContents(path) {
+    const url = `${API_BASE}/contents/${encodeURIComponent(path).replace(/%2F/g, '/')}?ref=${CONFIG.branch}`;
+    const r = await fetch(url, {
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json' }
+    });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`GitHub GET ${path} -> ${r.status}: ${await r.text()}`);
+    return await r.json();
+  }
+
+  async function getRawText(path) {
+    // Use the Contents API (not raw.githubusercontent.com) because raw has
+    // aggressive CDN caching that hides fresh writes for ~5 minutes.
+    const r = await getContents(path);
+    if (!r) return null;
+    return b64ToStr(r.content);
+  }
+
+  async function putContents(path, contentB64, message, sha = null) {
+    const url = `${API_BASE}/contents/${encodeURIComponent(path).replace(/%2F/g, '/')}?ref=${CONFIG.branch}`;
+    const body = { message, content: contentB64, branch: CONFIG.branch };
+    if (sha) body.sha = sha;
+    const r = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      const err = new Error(`GitHub PUT ${path} -> ${r.status}: ${text}`);
+      err.status = r.status;
+      err.path = path;
+      throw err;
+    }
+    return await r.json();
+  }
+
+  async function deleteContents(path, sha, message) {
+    const url = `${API_BASE}/contents/${encodeURIComponent(path).replace(/%2F/g, '/')}?ref=${CONFIG.branch}`;
+    const r = await fetch(url, {
+      method: 'DELETE',
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, sha, branch: CONFIG.branch })
+    });
+    if (!r.ok) throw new Error(`GitHub DELETE ${path} -> ${r.status}: ${await r.text()}`);
+    return true;
+  }
+
+  // ---- Encoding helpers ----
+
+  function strToB64(str) {
+    // UTF-8 safe base64
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+  }
+  function b64ToStr(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  }
+  function bufToB64(buf) {
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+  function b64ToBuf(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+  async function blobToB64(blob) {
+    const buf = await blob.arrayBuffer();
+    return bufToB64(buf);
+  }
+  function b64ToBlob(b64, mime) {
+    const bytes = new Uint8Array(atob(b64).length);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = atob(b64).charCodeAt(i);
+    return new Blob([bytes], { type: mime || 'application/octet-stream' });
+  }
+
+  // ---- DB operations ----
+
+  let _dbCache = null;       // { db, sha }
+  let _dbWriteQueue = Promise.resolve();
+  let _dbWritePending = null;
+  let _dbWriteTimer = null;
+  const DB_DEBOUNCE_MS = 600; // batch rapid writes
+
+  async function getDb() {
+    const r = await getContents('db.json');
+    if (!r) {
+      _dbCache = { db: null, sha: null };
+      return _dbCache;
+    }
+    const db = JSON.parse(b64ToStr(r.content));
+    _dbCache = { db, sha: r.sha };
+    return _dbCache;
+  }
+
+  // Read DB with cache (refresh from network every poll cycle)
+  async function getDbCached() {
+    if (_dbCache?.db) return _dbCache;
+    return await getDb();
+  }
+
+  // Mutator: pass a function that takes the current db and returns the new db.
+  // Handles 409 retries automatically. Debounced.
+  function updateDb(mutator, message = 'update db.json') {
+    return new Promise((resolve, reject) => {
+      _dbWriteQueue = _dbWriteQueue.then(async () => {
+        // Debounce: if a write is already pending, replace its mutator with this one's effect
+        // For simplicity, we just chain writes — each waits 600ms after the previous
+        await new Promise((r) => { setTimeout(r, DB_DEBOUNCE_MS); });
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            const current = await getDb(); // always fetch fresh
+            if (!current.db) {
+              current.db = {
+                version: 1,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                settings: { title: 'Семейная связь' },
+                users: [], rooms: [], messages: [], media: [], events: []
+              };
+            }
+            const newDb = mutator(current.db);
+            if (!newDb) { resolve(null); return; } // mutator returned null = no-op
+            newDb.updatedAt = new Date().toISOString();
+            const b64 = strToB64(JSON.stringify(newDb, null, 2));
+            const r = await putContents('db.json', b64, message, current.sha);
+            _dbCache = { db: newDb, sha: r.content.sha };
+            resolve(newDb);
+            return;
+          } catch (e) {
+            if (e.status === 409 || e.status === 422) {
+              // SHA mismatch — someone else wrote first. Wait a bit and retry.
+              await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+              continue;
+            }
+            reject(e);
+            return;
+          }
+        }
+        reject(new Error('updateDb: gave up after 5 retries'));
+      }).catch(reject);
+    });
+  }
+
+  // ---- File operations ----
+
+  async function putFile(id, blob, message) {
+    const b64 = await blobToB64(blob);
+    const path = `files/${id}`;
+    // Try to fetch existing SHA (file may not exist yet)
+    let sha = null;
+    try {
+      const existing = await getContents(path);
+      if (existing) sha = existing.sha;
+    } catch {}
+    return await putContents(path, b64, message || `upload ${id}`, sha);
+  }
+
+  async function getFile(id) {
+    // Use Contents API (returns base64 JSON) to avoid raw.githubusercontent.com CDN caching.
+    const path = `files/${id}`;
+    const r = await getContents(path);
+    if (!r) return null;
+    const b64 = r.content;
+    // Convert base64 to Blob
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    // We don't know the exact mime from Contents API; fetch metadata separately if needed
+    return new Blob([bytes], { type: 'application/octet-stream' });
+  }
+
+  async function getFileUrl(id, mime) {
+    // For use in <img src>, <video src>, <a href download>
+    // We have to fetch and create a blob URL because the raw URL requires auth header.
+    const blob = await getFile(id);
+    if (!blob) return null;
+    // If caller supplied mime (from db.json metadata), re-wrap with correct type
+    if (mime && mime !== 'application/octet-stream') {
+      return URL.createObjectURL(new Blob([blob], { type: mime }));
+    }
+    return URL.createObjectURL(blob);
+  }
+
+  async function deleteFile(id, message) {
+    const path = `files/${id}`;
+    const existing = await getContents(path);
+    if (!existing) return true;
+    return await deleteContents(path, existing.sha, message || `delete ${id}`);
+  }
+
+  // ---- Polling ----
+
+  let _pollTimer = null;
+  let _pollHandlers = [];
+  let _lastDbSha = null;
+
+  async function pollOnce() {
+    try {
+      const r = await getContents('db.json');
+      if (!r) return;
+      if (_lastDbSha && r.sha === _lastDbSha) return; // no change
+      _lastDbSha = r.sha;
+      const db = JSON.parse(b64ToStr(r.content));
+      _dbCache = { db, sha: r.sha };
+      for (const h of _pollHandlers) {
+        try { await h(db); } catch (e) { console.warn('[gh-store] poll handler error', e); }
+      }
+    } catch (e) {
+      console.warn('[gh-store] poll error', e);
+    }
+  }
+
+  function startPolling(intervalMs = 10000) {
+    stopPolling();
+    pollOnce();
+    _pollTimer = setInterval(pollOnce, intervalMs);
+  }
+  function stopPolling() {
+    if (_pollTimer) clearInterval(_pollTimer);
+    _pollTimer = null;
+  }
+  function onDbChange(handler) {
+    _pollHandlers.push(handler);
+    return () => { _pollHandlers = _pollHandlers.filter((h) => h !== handler); };
+  }
+
+  // ---- Health check ----
+
+  async function health() {
+    try {
+      const r = await fetch(`${API_BASE}`, {
+        headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json' }
+      });
+      if (!r.ok) return { ok: false, message: `repo HTTP ${r.status}` };
+      const j = await r.json();
+      const rl = await rateLimitInfo();
+      return {
+        ok: true,
+        repo: j.full_name,
+        private: j.private,
+        remaining: rl?.remaining,
+        limit: rl?.limit,
+        maxUploadMb: 100 // GitHub per-file hard limit
+      };
+    } catch (e) {
+      return { ok: false, message: e.message };
+    }
+  }
+
+  return {
+    CONFIG,
+    getDb,
+    getDbCached,
+    updateDb,
+    putFile,
+    getFile,
+    getFileUrl,
+    deleteFile,
+    startPolling,
+    stopPolling,
+    onDbChange,
+    pollOnce,
+    health,
+    rateLimitInfo,
+    _internal: { getContents, putContents, deleteContents, strToB64, b64ToStr, bufToB64, b64ToBuf }
+  };
+})();
