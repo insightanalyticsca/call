@@ -584,7 +584,7 @@ async function joinByCode(code, inviteToken) {
 }
 function renderPresence() {
   const me = state.user?.displayName || state.user?.username || 'Я';
-  const others = Array.from(state.dataConnections.keys()).map((pid) => state.dataConnections.get(pid)?.metadata?.displayName || 'Гость');
+  const others = Array.from(state.dataConnections.values()).map((c) => c._displayName || c.metadata?.displayName || c.metadata?.username || 'Гость');
   const all = [me, ...others];
   $('#presenceBox').textContent = `Участники: ${all.join(', ') || '-'}`;
 }
@@ -698,9 +698,13 @@ async function joinPeerRoom(room) {
       probe.on('connection', (conn) => onDataConnectionIncoming(conn));
       probe.on('call', (call) => onMediaCallIncoming(call));
     });
+    let idTakenHandled = false;
     probe.on('error', (err) => {
       if (err?.type === 'unavailable-id') {
-        // Host already exists — destroy probe and become a client connecting to host
+        // Host already exists — destroy probe and become a client connecting to host.
+        // This is normal flow, not a real error, so we suppress the console noise.
+        if (idTakenHandled) return;
+        idTakenHandled = true;
         try { probe.destroy(); } catch {}
         state.roomPeer = null;
         state.isRoomHost = false;
@@ -768,8 +772,14 @@ function teardownMesh() {
 
 /* ---------- Incoming data connections (host or peer) ---------- */
 function onDataConnectionIncoming(conn) {
+  // Capture the remote peer's display name from connection metadata
+  const remoteName = conn.metadata?.displayName || conn.metadata?.username || 'Гость';
   conn.on('open', () => {
     state.dataConnections.set(conn.peer, conn);
+    // Store display name on the connection for renderPresence
+    conn._displayName = remoteName;
+    // Send a hello so the other side learns my display name too
+    try { conn.send({ kind: 'hello', from: state.peerId, displayName: state.user?.displayName || state.user?.username, username: state.user?.username, role: state.user?.role }); } catch {}
     renderPresence();
     // If I'm the host, broadcast updated presence to everyone
     if (state.isRoomHost) broadcastPresence();
@@ -847,10 +857,22 @@ function updateRemoteVideo() {
 function onDataMessage(data, conn) {
   if (!data || typeof data !== 'object') return;
   switch (data.kind) {
+    case 'hello': {
+      onHelloMessage(data, conn);
+      break;
+    }
     case 'presence-request': {
       // Sender wants to know who's in the room
-      // Reply with current peers I know about
-      const peers = Array.from(state.dataConnections.keys()).filter((id) => id !== data.from && id !== conn.peer);
+      // Reply with current peers I know about (including displayNames)
+      const peers = Array.from(state.dataConnections.entries())
+        .filter(([id]) => id !== data.from && id !== conn.peer)
+        .map(([id, c]) => ({ peerId: id, displayName: c._displayName || c.metadata?.displayName || 'Гость' }));
+      // Include myself in the response so the requester learns my name
+      peers.unshift({ peerId: state.peerId, displayName: state.user?.displayName || state.user?.username });
+      // If I'm the host, also include my room peer identity
+      if (state.isRoomHost && state.roomPeer?.id) {
+        peers.unshift({ peerId: state.roomPeer.id, displayName: state.user?.displayName || state.user?.username, isHost: true });
+      }
       conn.send({ kind: 'presence-list', peers, from: state.peerId });
       // If I'm the host, also tell everyone else about this new peer
       if (state.isRoomHost) {
@@ -864,9 +886,13 @@ function onDataMessage(data, conn) {
     case 'presence-list': {
       // Host told me about other peers — connect to each
       if (Array.isArray(data.peers)) {
-        for (const pid of data.peers) {
-          if (pid === state.peerId || state.dataConnections.has(pid)) continue;
+        for (const p of data.peers) {
+          const pid = typeof p === 'string' ? p : p.peerId;
+          const pname = typeof p === 'string' ? null : p.displayName;
+          if (!pid || pid === state.peerId || state.dataConnections.has(pid)) continue;
+          // Connect to this peer
           const c = state.peer.connect(pid, { reliable: true, metadata: { displayName: state.user.displayName || state.user.username, username: state.user.username, role: state.user.role, peerId: state.peerId } });
+          if (pname) c._displayName = pname;
           c.on('open', () => { state.dataConnections.set(pid, c); renderPresence(); });
           c.on('data', (d) => onDataMessage(d, c));
           c.on('close', () => { state.dataConnections.delete(pid); renderPresence(); });
@@ -934,6 +960,14 @@ function gossipMessage(payload, exceptPeerId = null) {
   for (const [pid, c] of state.dataConnections.entries()) {
     if (pid === exceptPeerId) continue;
     try { c.send(payload); } catch {}
+  }
+}
+
+// Hello handler: peer just connected, learn their display name
+function onHelloMessage(data, conn) {
+  if (data.displayName) {
+    conn._displayName = data.displayName;
+    renderPresence();
   }
 }
 function broadcastPresence() {
