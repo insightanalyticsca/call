@@ -1134,13 +1134,13 @@ async function refreshMail() {
   if (!state.user) return;
   await ensureDb();
   const items = _db.media.filter((m) => m.type === 'mail' && !m.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  renderMediaList($('#mailList'), items);
+  renderMediaList($('#mailList'), items, 'mail');
 }
 async function refreshFiles() {
   if (!state.user) return;
   await ensureDb();
   const items = _db.media.filter((m) => m.type === 'file' && !m.deletedAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  renderMediaList($('#filesList'), items);
+  renderMediaList($('#filesList'), items, 'file');
 }
 function kindIcon(kind) { return { video: 'file-video', audio: 'file-audio', image: 'file-image', pdf: 'file-pdf', text: 'file-lines', other: 'file' }[kind] || 'file'; }
 function downloadStats(m) {
@@ -1150,10 +1150,17 @@ function downloadStats(m) {
   const when = m.lastDownloadedAt ? fmtTime(m.lastDownloadedAt) : '';
   return `Downloads: ${count} · last ${who}${when ? ' · ' + when : ''}`;
 }
-function renderMediaList(box, items) {
+function renderMediaList(box, items, listKey) {
+  if (!box) return;
+  // Skip re-render if the list hasn't changed (prevents race condition where
+  // poll-triggered re-renders destroy inline players that are still downloading
+  // large files from the Git Blobs API)
+  const fingerprint = items.map((m) => m.id + ':' + m.size + ':' + (m.updatedAt || '')).join('|');
+  if (box._lastFingerprint === fingerprint) return;
+  box._lastFingerprint = fingerprint;
+
   if (!items.length) { box.className = 'media-list empty'; box.textContent = 'Пока пусто.'; return; }
   box.className = 'media-list';
-  // Render with a placeholder that will be replaced by the inline player
   box.innerHTML = items.map((m) => `
     <div class="media-item" data-id="${m.id}">
       <div class="media-top">
@@ -1176,7 +1183,7 @@ function renderMediaList(box, items) {
   box.querySelectorAll('.preview-media').forEach((b) => b.onclick = () => openPreview(items.find((m) => m.id === b.dataset.id)));
   box.querySelectorAll('.download-media').forEach((b) => b.onclick = () => downloadMedia(items.find((m) => m.id === b.dataset.id)));
   box.querySelectorAll('.delete-media').forEach((b) => b.onclick = () => deleteMedia(b.dataset.id));
-  // Auto-load inline players for all media types (video, audio, image, pdf)
+  // Auto-load inline players for all media types
   box.querySelectorAll('.media-placeholder').forEach((holder) => {
     const m = items.find((x) => x.id === holder.dataset.id);
     if (m) inlinePlayerInto(m, holder);
@@ -1185,9 +1192,14 @@ function renderMediaList(box, items) {
 // Inline player — auto-loads inline preview/player for all media types
 async function inlinePlayerInto(m, holder) {
   if (!holder) return;
+  // Guard: skip if already loaded or loading
+  if (m._inlineLoaded) return;
+  m._inlineLoaded = true;
   holder.innerHTML = '<span class="meta">Загрузка…</span>';
   try {
     const url = await GH.getFileUrl(m.id, m.mime);
+    // Check if holder is still in the DOM (might have been replaced by a re-render)
+    if (!holder.isConnected) return;
     if (!url) { holder.innerHTML = '<span class="meta warn-text">Файл не найден.</span>'; return; }
     m._url = url;
     const lowerName = m.originalName.toLowerCase();
@@ -1197,6 +1209,7 @@ async function inlinePlayerInto(m, holder) {
       holder.innerHTML = `<div class="media-player"><video controls playsinline src="${url}"></video></div>`;
       const v = holder.querySelector('video');
       v.addEventListener('error', () => {
+        if (!holder.isConnected) return;
         holder.innerHTML = `<div class="media-placeholder" style="padding:20px;text-align:center">
           <span class="meta" style="display:block;margin-bottom:8px">Видео не поддерживается браузером</span>
           <a class="button small" href="${url}" download="${escapeHtml(m.originalName)}"><span data-icon="download"></span><span>Скачать оригинал</span></a>
@@ -1208,6 +1221,7 @@ async function inlinePlayerInto(m, holder) {
       holder.innerHTML = `<div class="media-player"><img src="${url}" alt="${escapeHtml(m.originalName)}" loading="lazy" style="max-width:100%;border-radius:14px"></div>`;
       const img = holder.querySelector('img');
       img.addEventListener('error', () => {
+        if (!holder.isConnected) return;
         holder.innerHTML = `<div class="media-placeholder" style="padding:20px;text-align:center">
           <span class="meta" style="display:block;margin-bottom:8px">Изображение не поддерживается</span>
           <a class="button small" href="${url}" download="${escapeHtml(m.originalName)}"><span data-icon="download"></span><span>Скачать оригинал</span></a>
@@ -1216,7 +1230,6 @@ async function inlinePlayerInto(m, holder) {
       });
     }
     else if (m.kind === 'image' && isHeic) {
-      // HEIC not supported by Chrome/Firefox — show download link
       holder.innerHTML = `<div class="media-placeholder" style="padding:16px;text-align:center">
         <span class="meta" style="display:block;margin-bottom:8px">HEIC фото (iPhone) — не отображается в браузере</span>
         <a class="button small" href="${url}" download="${escapeHtml(m.originalName)}"><span data-icon="download"></span><span>Скачать оригинал</span></a>
@@ -1225,13 +1238,12 @@ async function inlinePlayerInto(m, holder) {
     }
     else if (m.kind === 'pdf') holder.innerHTML = `<div class="media-player"><iframe src="${url}"></iframe></div>`;
     else {
-      // 'other' or 'text' — show download button
       holder.innerHTML = `<div class="media-placeholder" style="padding:16px;text-align:center">
         <a class="button small" href="${url}" download="${escapeHtml(m.originalName)}"><span data-icon="download"></span><span>Скачать ${escapeHtml(m.originalName)}</span></a>
       </div>`;
       renderIcons(holder);
     }
-  } catch (e) { holder.innerHTML = `<span class="meta warn-text">Ошибка: ${escapeHtml(e.message)}</span>`; }
+  } catch (e) { if (holder.isConnected) holder.innerHTML = `<span class="meta warn-text">Ошибка: ${escapeHtml(e.message)}</span>`; }
 }
 async function openPreview(m) {
   if (!m) return;
