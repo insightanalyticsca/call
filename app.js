@@ -742,7 +742,7 @@ let _stopStreams = new Map(); // peerId -> stopStream function (from makePeer)
 async function ensureTrystero() {
   if (_trysteroMod) return _trysteroMod;
   try {
-    _trysteroMod = await import('https://cdn.jsdelivr.net/npm/trystero@0.21.0/+esm');
+    _trysteroMod = await import('https://cdn.jsdelivr.net/npm/trystero@0.21.0/firebase/+esm');
     return _trysteroMod;
   } catch (e) {
     console.error('[trystero] failed to load', e);
@@ -777,18 +777,16 @@ async function joinPeerRoom(room) {
   const config = {
     appId: 'insightanalyticsca-call-v1',
     rtcConfig: { iceServers: ICE_SERVERS },
-    // Use reliable Nostr relays (Trystero config key is 'relayUrls', NOT 'relays')
-    // Trystero's default relay list includes some that block posts (e.g. grooveix.com)
-    relayUrls: [
-      'wss://relay.damus.io',
-      'wss://nos.lol',
-      'wss://nostr.mom',
-      'wss://relay.nostr.net',
-      'wss://nostr-verified.wellorder.net',
-      'wss://relay.current.fyi',
-      'wss://purplerelay.com',
-      'wss://relay.noswhere.com'
-    ]
+    // Firebase Realtime Database for reliable peer discovery
+    firebaseConfig: {
+      apiKey: 'AIzaSyASaMK7TbDW1ToJJF_kh_muZyEvAfyIjp4',
+      authDomain: 'family-call-477c7.firebaseapp.com',
+      databaseURL: 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app/',
+      projectId: 'family-call-477c7',
+      storageBucket: 'family-call-477c7.firebasestorage.app',
+      messagingSenderId: '842679997577',
+      appId: '1:842679997577:web:53a87c7949ad0ac3d9a258'
+    }
   };
 
   try {
