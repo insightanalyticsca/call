@@ -181,7 +181,7 @@ function updateCallGuide() {
   let roomPicker = '';
   if (!hasRoom && state.rooms.length > 0) {
     roomPicker = '<div class="guide-rooms">' +
-      state.rooms.map((r) => `<button class="guide-room-btn" data-room-id="${r.id}"><span data-icon="video"></span><span>${escapeHtml(r.title)}</span><span class="guide-room-code">${escapeHtml(r.code)}</span></button>`).join('') +
+      state.rooms.map((r) => `<button class="guide-room-btn" data-room-id="${r.id}"><span class="guide-room-icon"><span data-icon="video"></span></span><span class="guide-room-label"><strong>Комната</strong> ${escapeHtml(r.title)}</span><span class="guide-room-code">${escapeHtml(r.code)}</span></button>`).join('') +
       '</div>';
   } else if (!hasRoom) {
     roomPicker = '<div class="guide-rooms-empty">Нет комнат. Нажмите кнопку 🎥 вверху слева, чтобы создать.</div>';
@@ -536,10 +536,17 @@ function renderRooms() {
   updateCallGuide();
 }
 async function createRoom() {
-  const title = $('#roomTitle').value.trim() || 'Семейный звонок';
+  const title = $('#roomTitle').value.trim() || 'Семейная связь';
   await ensureDb();
-  let code;
-  for (let tries = 0; tries < 8; tries++) { code = randomCode(); if (!_db.rooms.some((r) => r.code === code)) break; }
+  // Use a descriptive, friendly code instead of random characters
+  // (the user said they probably won't need multiple rooms)
+  let code = 'SEMJA'; // "семья" (family) in Latin
+  // If that code is taken, append a number
+  if (_db.rooms.some((r) => r.code === code)) {
+    let n = 2;
+    while (_db.rooms.some((r) => r.code === code + '-' + n)) n++;
+    code = code + '-' + n;
+  }
   const room = {
     id: randomId('room_'),
     code,

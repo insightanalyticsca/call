@@ -497,44 +497,59 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
 .guide-rooms {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 .guide-room-btn {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--glass-border);
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 2px solid rgba(99, 102, 241, 0.3);
   color: var(--text);
-  font-size: 13px;
-  min-height: 38px;
+  font-size: 15px;
+  font-weight: 600;
+  min-height: 56px;
   cursor: pointer;
   transition: all var(--t);
   text-align: left;
+  width: 100%;
 }
 .guide-room-btn:hover {
-  background: rgba(99, 102, 241, 0.15);
-  border-color: rgba(99, 102, 241, 0.4);
-  transform: translateX(2px);
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.6);
+  transform: translateX(4px);
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.2);
 }
+.guide-room-icon {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  display: grid; place-items: center;
+  background: rgba(99, 102, 241, 0.25);
+  flex-shrink: 0;
+}
+.guide-room-icon [data-icon] { width: 20px; height: 20px; }
+.guide-room-icon [data-icon] svg, .guide-room-icon [data-icon] i { width: 20px !important; height: 20px !important; font-size: 20px !important; color: #c7d2fe !important; }
+.guide-room-label { flex: 1; min-width: 0; }
+.guide-room-label strong { color: #818cf8; font-weight: 600; margin-right: 4px; }
 .guide-room-code {
-  margin-left: auto;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted);
   font-family: monospace;
-  background: rgba(255,255,255,0.06);
-  padding: 2px 6px;
-  border-radius: 6px;
+  background: rgba(255,255,255,0.08);
+  padding: 4px 10px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  letter-spacing: 0.05em;
 }
 .guide-rooms-empty {
-  padding: 12px;
+  padding: 16px;
   text-align: center;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
-  border: 1px dashed var(--glass-border);
-  border-radius: 12px;
+  border: 2px dashed var(--glass-border);
+  border-radius: 14px;
 }
 
 /* Step list */
