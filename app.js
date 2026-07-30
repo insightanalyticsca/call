@@ -437,7 +437,7 @@ async function login() {
 function logout() {
   clearSession();
   state.user = null;
-  disconnectPeer();
+  await disconnectPeer();
   resetCall();
   requireLoginUi();
   toast('Вы вышли.');
@@ -659,7 +659,7 @@ async function deleteRoom(id) {
 }
 function leaveRoom() {
   hangup(false);
-  disconnectPeer();
+  await disconnectPeer();
   state.currentRoom = null;
   state.currentInviteToken = null;
   $('#currentRoomTitle').textContent = 'Комната не выбрана';
@@ -910,7 +910,7 @@ function trysteroBroadcast(obj) {
   } catch (e) { console.warn('[fb] broadcast failed', e); }
 }
 
-function disconnectPeer() {
+async function disconnectPeer() {
   if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; }
   await FB.leave();
   _peerNames.clear();
@@ -1693,7 +1693,7 @@ async function resetAllData() {
   state.user = null;
   state.rooms = [];
   state.currentRoom = null;
-  disconnectPeer();
+  await disconnectPeer();
   resetCall();
   requireLoginUi();
   toast('Данные сброшены.', 'ok');
@@ -2015,10 +2015,10 @@ async function init() {
   setInterval(checkHealth, 60000);
   // Leave Trystero room on page close
   window.addEventListener('beforeunload', () => {
-    if (state._room) { try { await FB.leave(); } catch {} }
+    if (state._room) { try { FB.leave(); } catch {} }
   });
   window.addEventListener('pagehide', () => {
-    if (state._room) { try { await FB.leave(); } catch {} }
+    if (state._room) { try { FB.leave(); } catch {} }
   });
   // Show invite hint on login screen if there's a room in URL
   const params = new URLSearchParams(location.search);
