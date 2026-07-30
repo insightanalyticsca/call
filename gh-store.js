@@ -235,9 +235,16 @@ const GH = (function () {
     return new Blob([bytes], { type: 'application/octet-stream' });
   }
 
+  // Persistent blob URL cache — survives db.json poll replacements.
+  // Keyed by mediaId, stores { url, mime }. Prevents re-fetching the same
+  // file from GitHub on every list re-render.
+  const _blobUrlCache = new Map();
+
   async function getFileUrl(id, mime) {
-    // For use in <img src>, <video src>, <a href download>
-    // We have to fetch and create a blob URL because the raw URL requires auth header.
+    // Return cached blob URL if we already fetched this file
+    const cached = _blobUrlCache.get(id);
+    if (cached) return cached;
+
     const blob = await getFile(id);
     if (!blob) return null;
     // Normalize MIME: browsers can't play video/quicktime (MOV), but MOV and MP4
@@ -247,10 +254,22 @@ const GH = (function () {
     if (mime === 'video/quicktime' || mime === 'video/x-quicktime') {
       finalMime = 'video/mp4';
     }
+    let url;
     if (finalMime && finalMime !== 'application/octet-stream') {
-      return URL.createObjectURL(new Blob([blob], { type: finalMime }));
+      url = URL.createObjectURL(new Blob([blob], { type: finalMime }));
+    } else {
+      url = URL.createObjectURL(blob);
     }
-    return URL.createObjectURL(blob);
+    _blobUrlCache.set(id, url);
+    return url;
+  }
+
+  function revokeBlobUrl(id) {
+    const url = _blobUrlCache.get(id);
+    if (url) {
+      try { URL.revokeObjectURL(url); } catch {}
+      _blobUrlCache.delete(id);
+    }
   }
 
   async function deleteFile(id, message) {
@@ -327,6 +346,7 @@ const GH = (function () {
     putFile,
     getFile,
     getFileUrl,
+    revokeBlobUrl,
     deleteFile,
     startPolling,
     stopPolling,

@@ -1192,9 +1192,6 @@ function renderMediaList(box, items, listKey) {
 // Inline player — auto-loads inline preview/player for all media types
 async function inlinePlayerInto(m, holder) {
   if (!holder) return;
-  // Guard: skip if already loaded or loading
-  if (m._inlineLoaded) return;
-  m._inlineLoaded = true;
   holder.innerHTML = '<span class="meta">Загрузка…</span>';
   try {
     const url = await GH.getFileUrl(m.id, m.mime);
@@ -1306,10 +1303,15 @@ async function deleteMedia(id) {
   await ensureDb();
   const rec = _db.media.find((x) => x.id === id);
   if (!rec) return;
+  // Revoke cached blob URL to free memory
+  GH.revokeBlobUrl(id);
   // Soft-delete metadata, attempt blob deletion (may fail if file already gone)
   rec.deletedAt = new Date().toISOString();
   await saveDb(_db);
   try { await GH.deleteFile(id, `delete ${rec.originalName}`); } catch (e) { console.warn('blob delete failed', e); }
+  // Force re-render by clearing fingerprint
+  $('#filesList')._lastFingerprint = null;
+  $('#mailList')._lastFingerprint = null;
   await refreshMail();
   await refreshFiles();
   toast('Удалено.', 'ok');
