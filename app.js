@@ -536,17 +536,18 @@ function renderRooms() {
   updateCallGuide();
 }
 async function createRoom() {
-  const title = $('#roomTitle').value.trim() || 'Семейная связь';
   await ensureDb();
-  // Use a descriptive, friendly code instead of random characters
-  // (the user said they probably won't need multiple rooms)
-  let code = 'SEMJA'; // "семья" (family) in Latin
-  // If that code is taken, append a number
-  if (_db.rooms.some((r) => r.code === code)) {
-    let n = 2;
-    while (_db.rooms.some((r) => r.code === code + '-' + n)) n++;
-    code = code + '-' + n;
+  // Reuse existing room — don't create duplicates
+  if (_db.rooms.length > 0) {
+    const existing = _db.rooms[0];
+    if (!state.rooms.some((x) => x.id === existing.id)) state.rooms.unshift(existing);
+    toast('Вход в существующую комнату…', 'info');
+    await selectRoom(existing.id, existing.inviteToken);
+    return;
   }
+  // No room exists yet — create the default family room
+  const title = 'Семейная связь';
+  const code = 'SEMJA';
   const room = {
     id: randomId('room_'),
     code,
