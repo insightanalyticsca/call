@@ -244,21 +244,31 @@ const FB = (function () {
   async function _cleanupStalePeers() {
     if (!_roomId) return;
     const peers = await _fbGet(`/rooms/${_roomId}/peers`);
-    if (!peers) return;
     const now = Date.now();
-    for (const [peerId, info] of Object.entries(peers)) {
-      if (peerId === _selfId) continue;
-      const lastSeen = info.lastSeen || info.joinedAt || 0;
-      if (now - lastSeen > 15000) {
-        // Stale — delete
-        await _fbDelete(`/rooms/${_roomId}/peers/${peerId}`);
-        await _fbDelete(`/rooms/${_roomId}/signals/${peerId}`);
-        if (_peers.has(peerId)) {
-          const peer = _peers.get(peerId);
-          if (peer.pc) { try { peer.pc.close(); } catch {} }
-          _peers.delete(peerId);
-          if (_onPeerLeave) _onPeerLeave(peerId);
+    const livePeerIds = new Set();
+    
+    // Check Firebase peers
+    if (peers) {
+      for (const [peerId, info] of Object.entries(peers)) {
+        if (peerId === _selfId) { livePeerIds.add(peerId); continue; }
+        const lastSeen = info.lastSeen || info.joinedAt || 0;
+        if (now - lastSeen > 15000) {
+          // Stale — delete from Firebase
+          await _fbDelete(`/rooms/${_roomId}/peers/${peerId}`);
+          await _fbDelete(`/rooms/${_roomId}/signals/${peerId}`);
+        } else {
+          livePeerIds.add(peerId);
         }
+      }
+    }
+    
+    // Clean local _peers: remove any peer not in livePeerIds
+    for (const peerId of _peers.keys()) {
+      if (!livePeerIds.has(peerId)) {
+        const peer = _peers.get(peerId);
+        if (peer.pc) { try { peer.pc.close(); } catch {} }
+        _peers.delete(peerId);
+        if (_onPeerLeave) _onPeerLeave(peerId);
       }
     }
   }
