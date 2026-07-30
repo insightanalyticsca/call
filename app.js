@@ -253,33 +253,33 @@ async function seedDefaultUsers() {
   if (changed) await saveDb(_db);
 }
 
-/* ---------- Session ---------- */
+/* ---------- Session (persists across tab close via localStorage) ---------- */
 function setSession(user) {
   const token = randomToken();
-  const session = { token, userId: user.id, username: user.username, displayName: user.displayName, role: user.role, createdAt: new Date().toISOString() };
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  // Also persist a 14-day login in localStorage so refreshes keep you logged in
-  const longSession = { ...session, expiresAt: new Date(Date.now() + 14 * 86400 * 1000).toISOString() };
-  localStorage.setItem(SESSION_KEY + '-long', JSON.stringify(longSession));
+  const session = { token, userId: user.id, username: user.username, displayName: user.displayName, role: user.role, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 14 * 86400 * 1000).toISOString() };
+  // Use localStorage only (not sessionStorage) so login survives tab/browser close
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
 }
 function getSession() {
   try {
-    const s = sessionStorage.getItem(SESSION_KEY);
-    if (s) return JSON.parse(s);
-    const l = localStorage.getItem(SESSION_KEY + '-long');
-    if (l) {
-      const ls = JSON.parse(l);
-      if (ls.expiresAt && new Date(ls.expiresAt) > new Date()) {
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify(ls));
-        return ls;
-      }
+    const s = localStorage.getItem(SESSION_KEY);
+    if (!s) return null;
+    const session = JSON.parse(s);
+    if (session.expiresAt && new Date(session.expiresAt) > new Date()) {
+      return session;
     }
+    // Expired — clean up
+    localStorage.removeItem(SESSION_KEY);
   } catch {}
   return null;
 }
 function clearSession() {
-  sessionStorage.removeItem(SESSION_KEY);
-  localStorage.removeItem(SESSION_KEY + '-long');
+  localStorage.removeItem(SESSION_KEY);
+  // Also clear old sessionStorage entry from previous versions
+  try { sessionStorage.removeItem(SESSION_KEY); } catch {}
+  try { localStorage.removeItem(SESSION_KEY + '-long'); } catch {}
+  // Clear persisted active tab so reload doesn't restore to a logged-out tab
+  try { localStorage.removeItem('call-static-active-tab'); } catch {}
 }
 
 /* ============================================================
@@ -378,6 +378,8 @@ function tab(name) {
   $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === name));
   closeDrawers();
+  // Persist active tab so it survives reload
+  try { localStorage.setItem('call-static-active-tab', name); } catch {}
   // Lazy-render stats when the stats tab is opened
   if (name === 'stats') { refreshStats().catch(() => {}); }
 }
@@ -1718,7 +1720,11 @@ function bind() {
 async function init() {
   renderIcons(document);
   bind();
-  enforceSingleActivePanel('calls');
+  // Restore active tab from previous session (default to 'calls')
+  const savedTab = (function() {
+    try { return localStorage.getItem('call-static-active-tab') || 'calls'; } catch { return 'calls'; }
+  })();
+  enforceSingleActivePanel(savedTab);
   enforceClosedDrawers();
   updateMediaControls();
   await checkBrowserMediaSupport();
@@ -1729,6 +1735,11 @@ async function init() {
   await checkHealth();
   await seedDefaultUsers();
   await loadMe();
+  // If logged in, re-apply saved tab (loadMe may have reset it)
+  if (state.user) {
+    enforceSingleActivePanel(savedTab);
+    if (savedTab === 'stats') refreshStats().catch(() => {});
+  }
   // Start polling GitHub for db.json changes every 10s (chat / rooms / files sync)
   GH.startPolling(10000);
   GH.onDbChange((newDb) => {
