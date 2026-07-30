@@ -740,7 +740,7 @@ async function ensureTrystero() {
 
 async function joinPeerRoom(room) {
   if (state._room) {
-    FB.leave();
+    await FB.leave();
     _peerNames.clear();
     for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
     _stopStreams.clear();
@@ -912,7 +912,7 @@ function trysteroBroadcast(obj) {
 
 function disconnectPeer() {
   if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; }
-  FB.leave();
+  await FB.leave();
   _peerNames.clear();
   for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
   _stopStreams.clear();
@@ -2015,10 +2015,10 @@ async function init() {
   setInterval(checkHealth, 60000);
   // Leave Trystero room on page close
   window.addEventListener('beforeunload', () => {
-    if (state._room) { try { FB.leave(); } catch {} }
+    if (state._room) { try { await FB.leave(); } catch {} }
   });
   window.addEventListener('pagehide', () => {
-    if (state._room) { try { FB.leave(); } catch {} }
+    if (state._room) { try { await FB.leave(); } catch {} }
   });
   // Show invite hint on login screen if there's a room in URL
   const params = new URLSearchParams(location.search);
