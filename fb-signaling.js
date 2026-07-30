@@ -136,19 +136,25 @@ const FB = (function () {
       const offer = JSON.parse(signalData.sdp);
       if (peer.makingOffer) {
         // Glare: both sides made offers. Lower peer ID wins.
-        if (_selfId < fromPeerId) return; // We keep our offer, ignore theirs
+        if (_selfId < fromPeerId) {
+          console.log('[fb] glare — keeping our offer, ignoring theirs');
+          await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
+          return;
+        }
       }
       if (!peer.pc) peer.pc = _createPC(fromPeerId);
-      peer.ignoreOffer = peer.makingOffer;
+      console.log('[fb] received offer from', fromPeerId.slice(0, 12));
       await peer.pc.setRemoteDescription(offer);
       const answer = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(answer);
       await _sendSignal(fromPeerId, { type: 'answer', sdp: JSON.stringify(answer), from: _selfId });
+      console.log('[fb] answer sent to', fromPeerId.slice(0, 12));
       // Delete the offer signal
       await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
     } else if (signalType === 'answer') {
-      if (peer.pc && peer.pc.signalingState !== 'stable') {
-        await peer.pc.setRemoteDescription(JSON.parse(signalData.sdp));
+      if (peer.pc) {
+        console.log('[fb] received answer from', fromPeerId.slice(0, 12), 'state=' + peer.pc.signalingState);
+        try { await peer.pc.setRemoteDescription(JSON.parse(signalData.sdp)); } catch(e) { console.warn('[fb] setRemoteDescription failed', e); }
       }
       await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/answer`);
     } else if (signalType === 'hangup') {
@@ -386,16 +392,15 @@ const FB = (function () {
         _peers.set(peerId, peer);
       }
       if (!peer.pc) peer.pc = _createPC(peerId);
-      // Perfect negotiation
-      const ready = peer.pc.signalingState === 'stable';
+      if (peer.pc.signalingState !== 'stable') return; // already negotiating
       peer.makingOffer = true;
       try {
-        await peer.pc.setLocalDescription({ type: 'offer' });
-        const offer = await peer.pc.createOffer();
+        const offer = await peer.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await peer.pc.setLocalDescription(offer);
         await _sendSignal(peerId, { type: 'offer', sdp: JSON.stringify(offer), from: _selfId });
+        console.log('[fb] offer sent to', peerId.slice(0, 12));
       } catch (e) {
-        console.warn('[call] offer failed', e);
+        console.warn('[fb] offer failed', e);
       }
       peer.makingOffer = false;
     },

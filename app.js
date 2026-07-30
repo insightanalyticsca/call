@@ -1029,14 +1029,15 @@ async function startCall() {
   });
   if (!state.localStream) return toast('Нет доступа к камере/микрофону.', 'bad');
 
-  // Send our stream to each peer via Trystero's addStream
+  // Send our stream to each peer via FB signaling
   let initiated = 0;
   for (const peerId of peerIds) {
     if (_stopStreams.has(peerId)) continue;
-    state._callingPeer = peerId; // track that we initiated
+    state._callingPeer = peerId;
     try {
-      const stop = state._room.addStream(state.localStream, peerId);
-      _stopStreams.set(peerId, stop);
+      FB.setLocalStream(state.localStream);
+      await FB.startCall(peerId);
+      _stopStreams.set(peerId, () => FB.stopStream(peerId));
       initiated++;
     } catch (e) {
       console.warn('[call] failed for', peerId.slice(0, 12), e);
