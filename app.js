@@ -795,14 +795,20 @@ async function joinPeerRoom(room) {
     return;
   }
 
-  // Set up custom actions for chat/hello/hangup sync
+  // Set up custom actions for chat/hello/hangup/ring sync
   const [sendChat, onChat] = _room.makeAction('chat');
   const [sendHello, onHello] = _room.makeAction('hello');
   const [sendHangup, onHangup] = _room.makeAction('hangup');
+  const [sendRing, onRing] = _room.makeAction('ring');
+  const [sendRingAccept, onRingAccept] = _room.makeAction('ringAccept');
+  const [sendRingDecline, onRingDecline] = _room.makeAction('ringDecline');
 
   state._sendChat = sendChat;
   state._sendHello = sendHello;
   state._sendHangup = sendHangup;
+  state._sendRing = sendRing;
+  state._sendRingAccept = sendRingAccept;
+  state._sendRingDecline = sendRingDecline;
   state._room = _room;
   state.peer = { connected: true };
   state.peerId = mod.selfId;
@@ -889,6 +895,75 @@ async function joinPeerRoom(room) {
     updateConnectionIndicator();
     toast('Собеседник завершил звонок.');
   });
+
+  // Incoming call notification — other peer is calling us
+  onRing((data, peerId) => {
+    const callerName = data?.displayName || 'Участник';
+    // Don't show if already in a call with this peer
+    if (state.remoteStreams.has(peerId)) return;
+    // Don't show if we're the one who initiated
+    if (state._callingPeer === peerId) return;
+    showIncomingCall(callerName, peerId);
+  });
+
+  // Other peer accepted our call
+  onRingAccept((_data, peerId) => {
+    toast('Звонок принят ✓', 'ok');
+    state._callingPeer = null;
+  });
+
+  // Other peer declined our call
+  onRingDecline((_data, peerId) => {
+    toast('Звонок отклонён.', 'warn');
+    state._callingPeer = null;
+    // Stop our stream to that peer
+    const stop = _stopStreams.get(peerId);
+    if (stop) { try { stop(); } catch {} _stopStreams.delete(peerId); }
+  });
+}
+
+// Show incoming call dialog
+function showIncomingCall(callerName, peerId) {
+  // Don't show multiple dialogs
+  if (document.getElementById('incomingCallDialog')) return;
+  const dialog = document.createElement('div');
+  dialog.id = 'incomingCallDialog';
+  dialog.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(17,24,39,0.98);backdrop-filter:blur(40px);border:1px solid var(--glass-border-strong);border-radius:24px;padding:28px;text-align:center;z-index:300;box-shadow:var(--shadow-lg);min-width:280px';
+  dialog.innerHTML = `
+    <div style="width:64px;height:64px;border-radius:50%;margin:0 auto 16px;display:grid;place-items:center;font-size:24px;font-weight:800;background:var(--accent-grad);color:white;animation:avatarFloat 2s ease-in-out infinite">📞</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:4px">Входящий звонок</div>
+    <div style="font-size:14px;color:var(--text-muted);margin-bottom:20px">${escapeHtml(callerName)} звонит вам</div>
+    <div style="display:flex;gap:10px;justify-content:center">
+      <button id="declineCallBtn" style="min-height:48px;padding:0 24px;border-radius:14px;background:var(--danger-grad);color:white;border:none;font-weight:700;cursor:pointer">Отклонить</button>
+      <button id="acceptCallBtn" style="min-height:48px;padding:0 24px;border-radius:14px;background:var(--success-grad);color:#021307;border:none;font-weight:700;cursor:pointer">Принять</button>
+    </div>`;
+  document.body.appendChild(dialog);
+
+  document.getElementById('acceptCallBtn').onclick = async () => {
+    dialog.remove();
+    // Send accept notification
+    if (state._sendRingAccept) state._sendRingAccept({});
+    // Auto-turn on camera + mic, then call back
+    toast('Подключение к звонку…', 'info');
+    try {
+      await ensureLocalMedia(true).catch(async (e) => {
+        return ensureLocalMedia(false);
+      });
+      if (state.localStream && state._room) {
+        const stop = state._room.addStream(state.localStream, peerId);
+        _stopStreams.set(peerId, stop);
+      }
+      updateCallGuide();
+    } catch (e) { toast('Не удалось подключиться: ' + e.message, 'bad'); }
+  };
+  document.getElementById('declineCallBtn').onclick = () => {
+    dialog.remove();
+    if (state._sendRingDecline) state._sendRingDecline({});
+    toast('Звонок отклонён.', 'warn');
+  };
+
+  // Auto-dismiss after 30s
+  setTimeout(() => { if (document.getElementById('incomingCallDialog')) { dialog.remove(); } }, 30000);
 }
 
 // Broadcast a JSON object to all peers via the appropriate action
@@ -1044,6 +1119,12 @@ async function startCall() {
     return toast('В комнате нет других участников. Убедитесь, что оба выбрали одну комнату.', 'warn');
   }
 
+  // Send ring notification to all peers BEFORE starting the call
+  // This shows an "Incoming call" dialog on the other device
+  if (state._sendRing) {
+    state._sendRing({ displayName: state.user.displayName || state.user.username });
+  }
+
   await ensureLocalMedia(true).catch(async (e) => {
     toast(`${e.message} Пробую только микрофон.`, 'warn');
     return ensureLocalMedia(false);
@@ -1054,6 +1135,7 @@ async function startCall() {
   let initiated = 0;
   for (const peerId of peerIds) {
     if (_stopStreams.has(peerId)) continue;
+    state._callingPeer = peerId; // track that we initiated
     try {
       const stop = state._room.addStream(state.localStream, peerId);
       _stopStreams.set(peerId, stop);
