@@ -777,13 +777,17 @@ async function joinPeerRoom(room) {
   const config = {
     appId: 'insightanalyticsca-call-v1',
     rtcConfig: { iceServers: ICE_SERVERS },
-    // Explicit reliable Nostr relays (Trystero's defaults include some that block posts)
-    relays: [
+    // Use reliable Nostr relays (Trystero config key is 'relayUrls', NOT 'relays')
+    // Trystero's default relay list includes some that block posts (e.g. grooveix.com)
+    relayUrls: [
       'wss://relay.damus.io',
       'wss://nos.lol',
+      'wss://nostr.mom',
       'wss://relay.nostr.net',
-      'wss://nostr-pub.wellorder.net',
-      'wss://relay.current.fyi'
+      'wss://nostr-verified.wellorder.net',
+      'wss://relay.current.fyi',
+      'wss://purplerelay.com',
+      'wss://relay.noswhere.com'
     ]
   };
 
