@@ -739,7 +739,7 @@ async function ensureTrystero() {
 }
 
 async function joinPeerRoom(room) {
-  if (_room) {
+  if (state._room) {
     FB.leave();
     _peerNames.clear();
     for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
