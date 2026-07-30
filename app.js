@@ -434,7 +434,7 @@ async function login() {
   const joinedFromInvite = await autoJoinFromUrl();
   maybeOpenRoomChooser(joinedFromInvite);
 }
-function logout() {
+async function logout() {
   clearSession();
   state.user = null;
   await disconnectPeer();
@@ -657,7 +657,7 @@ async function deleteRoom(id) {
   renderRooms();
   toast('Комната удалена.', 'ok');
 }
-function leaveRoom() {
+async function leaveRoom() {
   hangup(false);
   await disconnectPeer();
   state.currentRoom = null;
