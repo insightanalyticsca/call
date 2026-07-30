@@ -650,7 +650,7 @@ function leaveRoom() {
   $('#currentRoomCode').textContent = '-';
   if ($('#currentRoomTitleMirror')) $('#currentRoomTitleMirror').textContent = 'Комната не выбрана';
   if ($('#currentRoomCodeMirror')) $('#currentRoomCodeMirror').textContent = '-';
-  if ($('#callSubline')) $('#callSubline').textContent = 'Выберите комнату или откройте invite‑ссылку.';
+  if ($('#callSubline')) $('#callSubline').textContent = 'Выберите комнату ниже.';
   $('#inviteLink').value = '';
   $('#presenceBox').textContent = 'Участники: -';
   renderRooms();
@@ -660,7 +660,7 @@ function maybeOpenRoomChooser(joinedFromInvite = false) {
   if (!state.user || joinedFromInvite) return;
   if (!state.currentRoom) {
     tab('calls');
-    toast('Откройте комнаты кнопкой вверху слева.', 'info');
+    // Guide is shown inline on the call screen — no need to toast
   }
 }
 async function autoJoinFromUrl() {
