@@ -211,16 +211,27 @@ const GH = (function () {
   }
 
   async function getFile(id) {
-    // Use Contents API (returns base64 JSON) to avoid raw.githubusercontent.com CDN caching.
+    // Use Contents API first. For files > 1 MB, the Contents API returns
+    // empty content — fall back to the Git Blobs API which has no size limit.
     const path = `files/${id}`;
     const r = await getContents(path);
     if (!r) return null;
-    const b64 = r.content;
+
+    let b64 = r.content;
+    // If content is empty (file > 1 MB), use Git Blobs API with the SHA
+    if ((!b64 || b64.length === 0) && r.sha) {
+      const blobResp = await fetch(`${API_BASE}/git/blobs/${r.sha}`, {
+        headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json' }
+      });
+      if (!blobResp.ok) throw new Error(`Git Blobs API -> ${blobResp.status}`);
+      const blobData = await blobResp.json();
+      b64 = blobData.content;
+    }
+    if (!b64) return null;
     // Convert base64 to Blob
     const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    // We don't know the exact mime from Contents API; fetch metadata separately if needed
     return new Blob([bytes], { type: 'application/octet-stream' });
   }
 
