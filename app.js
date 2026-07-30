@@ -540,8 +540,19 @@ async function createRoom() {
   // Reuse existing room — don't create duplicates
   if (_db.rooms.length > 0) {
     const existing = _db.rooms[0];
-    if (!state.rooms.some((x) => x.id === existing.id)) state.rooms.unshift(existing);
-    toast('Вход в существующую комнату…', 'info');
+    // Normalize the room to use the standard code/title
+    let changed = false;
+    if (existing.code !== 'SEMJA') { existing.code = 'SEMJA'; changed = true; }
+    if (existing.title !== 'Семейная связь') { existing.title = 'Семейная связь'; changed = true; }
+    if (changed) {
+      existing.updatedAt = new Date().toISOString();
+      await saveDb(_db);
+    }
+    // Update local state.rooms to match
+    const idx = state.rooms.findIndex((x) => x.id === existing.id);
+    if (idx >= 0) state.rooms[idx] = existing;
+    else state.rooms.unshift(existing);
+    toast('Вход в комнату…', 'info');
     await selectRoom(existing.id, existing.inviteToken);
     return;
   }
