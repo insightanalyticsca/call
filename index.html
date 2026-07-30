@@ -7,7 +7,7 @@
   <title>Семейная связь</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="styles.css?v=20260727-trys9" />
+  <link rel="stylesheet" href="styles.css?v=20260727-trys10" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
   <script>
     // Synchronously restore session BEFORE page renders — prevents login screen flash on reload
@@ -26,8 +26,8 @@
     })();
   </script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" defer></script>
-  <script src="gh-store.js?v=20260727-trys9" defer></script>
-  <script src="app.js?v=20260727-trys9" defer></script>
+  <script src="gh-store.js?v=20260727-trys10" defer></script>
+  <script src="app.js?v=20260727-trys10" defer></script>
 </head>
 <body class="auth-only">
   <noscript>Для работы приложения нужен JavaScript.</noscript>
@@ -74,6 +74,7 @@
             <div class="avatar-ring">F</div>
             <h2>Семейный звонок</h2>
             <p id="callSubline">Выберите комнату или откройте invite‑ссылку.</p>
+            <div id="callGuide" class="call-guide"></div>
           </div>
         </div>
 
@@ -169,16 +170,20 @@
         <div class="card-head"><h3>Записать сообщение</h3><span id="recordTimer" class="timer">00:00</span></div>
         <input id="recordModeAudio" class="visually-hidden" type="radio" name="recordMode" value="audio" checked />
         <input id="recordModeVideo" class="visually-hidden" type="radio" name="recordMode" value="video" />
-        <div class="record-mode icon-segment" role="radiogroup" aria-label="Режим записи">
-          <button type="button" class="icon-action record-mode-btn active" data-mode="audio" data-tip="Аудио" aria-label="Аудио" title="Аудио"><span data-icon="microphone"></span></button>
-          <button type="button" class="icon-action record-mode-btn" data-mode="video" data-tip="Видео" aria-label="Видео" title="Видео"><span data-icon="video"></span></button>
+        <video id="recordPreview" class="record-preview hidden" controls playsinline muted></video>
+        <div class="mail-stage">
+          <div class="mail-empty" id="mailEmpty">
+            <div class="avatar-ring">M</div>
+            <p>Выберите режим и нажмите запись</p>
+          </div>
         </div>
-        <textarea id="mailNote" rows="3" placeholder="Короткая подпись к сообщению..."></textarea>
-        <div class="action-row">
-          <button id="startRecordBtn" class="primary icon-action" data-tip="Записать" title="Записать" aria-label="Записать"><span data-icon="record-vinyl"></span></button>
-          <button id="stopRecordBtn" class="danger icon-action" data-tip="Остановить" title="Остановить" aria-label="Остановить" disabled><span data-icon="square"></span></button>
+        <textarea id="mailNote" rows="2" placeholder="Короткая подпись к сообщению..." class="mail-note-input"></textarea>
+        <div class="call-controls mail-controls">
+          <button id="modeAudioBtn" class="call-action circle-control active" data-mode="audio" data-tip="Аудио" title="Аудио" aria-label="Аудио"><span data-icon="microphone"></span><span>Аудио</span></button>
+          <button id="modeVideoBtn" class="call-action circle-control" data-mode="video" data-tip="Видео" title="Видео" aria-label="Видео"><span data-icon="video"></span><span>Видео</span></button>
+          <button id="startRecordBtn" class="call-action circle-control primary-control" data-tip="Записать" title="Записать" aria-label="Записать"><span data-icon="record-vinyl"></span><span>Записать</span></button>
+          <button id="stopRecordBtn" class="call-action circle-control end-control" data-tip="Остановить" title="Остановить" aria-label="Остановить" disabled><span data-icon="square"></span><span>Стоп</span></button>
         </div>
-        <video id="recordPreview" class="record-preview hidden" controls playsinline></video>
       </article>
       <article class="glass-card media-card">
         <div class="card-head"><h3>Сохранённые сообщения</h3><button id="refreshMailBtn" class="ghost small icon-action" data-tip="Обновить" title="Обновить" aria-label="Обновить"><span data-icon="rotate"></span></button></div>

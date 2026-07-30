@@ -325,6 +325,52 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
 .action-row, .invite-row, .composer, .admin-form { display: flex; gap: 8px; align-items: stretch; }
 .action-row > *, .composer button { flex: 1; }
 .record-mode { display: flex; gap: 8px; margin: 10px 0; }
+
+/* Mail recorder — call-style layout */
+.mail-stage {
+  position: relative;
+  width: 100%;
+  min-height: 200px;
+  border-radius: var(--radius);
+  background: #000;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  margin: 10px 0;
+}
+.mail-empty {
+  text-align: center;
+  color: var(--text-muted);
+}
+.mail-empty .avatar-ring {
+  width: 72px; height: 72px;
+  border-radius: 50%;
+  margin: 0 auto 12px;
+  display: grid; place-items: center;
+  font-size: 28px; font-weight: 800;
+  background: var(--accent-grad);
+  color: white;
+  box-shadow: 0 0 32px rgba(99, 102, 241, 0.3);
+  animation: avatarFloat 4s ease-in-out infinite;
+}
+.mail-empty p { margin: 0; font-size: 13px; }
+#recordPreview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius);
+}
+#recordPreview.hidden { display: none !important; }
+.mail-note-input { margin: 8px 0; }
+.mail-controls {
+  position: static;
+  transform: none;
+  max-width: 100%;
+  justify-content: center;
+  padding: 8px;
+}
 .list, .messages, .media-list { display: grid; gap: 10px; min-height: 0; }
 .empty {
   min-height: 120px;
@@ -394,6 +440,54 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
 }
 .remote-empty h2 { margin: 0 0 8px; font-size: 22px; font-weight: 700; color: var(--text); }
 .remote-empty p { margin: 0; font-size: 14px; }
+
+/* Interactive call guide */
+.call-guide {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 340px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.guide-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--glass-border);
+  font-size: 13px;
+  text-align: left;
+  transition: all var(--t);
+  opacity: 0.5;
+}
+.guide-step.active {
+  opacity: 1;
+  border-color: var(--accent-light);
+  background: rgba(99, 102, 241, 0.12);
+  box-shadow: 0 0 16px rgba(99, 102, 241, 0.2);
+}
+.guide-step.done {
+  opacity: 0.7;
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.08);
+}
+.guide-step .step-num {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 12px; font-weight: 700;
+  background: var(--glass);
+  flex-shrink: 0;
+}
+.guide-step.active .step-num { background: var(--accent-grad); color: white; }
+.guide-step.done .step-num { background: var(--success-grad); color: #021307; }
+.guide-step .step-num::after { content: '✓'; display: none; }
+.guide-step.done .step-num::after { display: block; }
+.guide-step.done .step-num .num-text { display: none; }
 
 .call-topbar {
   position: absolute;

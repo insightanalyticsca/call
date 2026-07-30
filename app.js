@@ -126,6 +126,42 @@ function updateConnectionIndicator() {
     badge.className = 'conn-badge ready';
     badge.innerHTML = '<span class="conn-dot"></span><span>' + peerCount + ' участн. в комнате</span>';
   }
+  // Also update the interactive guide
+  updateCallGuide();
+}
+
+/* ---------- Interactive call guide ---------- */
+function updateCallGuide() {
+  const guide = $('#callGuide');
+  if (!guide) return;
+
+  const hasRoom = !!state.currentRoom;
+  const hasPeer = !!state.peer;
+  const peerCount = _peerNames.size;
+  const hasLocalMedia = !!state.localStream;
+  const hasVideo = hasVideoTrack(state.localStream);
+  const hasAudio = hasAudioTrack(state.localStream);
+  const inCall = state.remoteStreams.size > 0;
+
+  // Determine step states: pending (0), active (1), done (2)
+  const steps = [
+    { label: 'Выбрать комнату', state: hasRoom ? 2 : 1 },
+    { label: 'Включить камеру', state: hasVideo ? 2 : (hasRoom ? 1 : 0) },
+    { label: 'Включить микрофон', state: hasAudio ? 2 : (hasVideo ? 1 : (hasRoom ? 0 : 0)) },
+    { label: 'Дождаться участников', state: peerCount > 0 ? 2 : (hasAudio ? 1 : 0) },
+    { label: 'Нажать «Позвонить»', state: inCall ? 2 : (peerCount > 0 ? 1 : 0) }
+  ];
+
+  // Hide guide if in active call (all done)
+  if (inCall) {
+    guide.innerHTML = '<div class="guide-step done"><span class="step-num"></span><span>✓ В эфире — связь установлена</span></div>';
+    return;
+  }
+
+  guide.innerHTML = steps.map((s, i) => {
+    const cls = s.state === 2 ? 'done' : (s.state === 1 ? 'active' : '');
+    return `<div class="guide-step ${cls}"><span class="step-num"><span class="num-text">${i + 1}</span></span><span>${s.label}</span></div>`;
+  }).join('');
 }
 function isLocalOrigin() { return ['localhost', '127.0.0.1', '::1'].includes(location.hostname); }
 function randomId(prefix = '') { return `${prefix}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
@@ -946,12 +982,15 @@ async function toggleMute() {
     try { await ensureLocalMedia(false); } catch (e) { toast(e.message, 'bad'); return; }
     state.micMuted = false;
     updateMediaControls();
+    updateCallGuide();
+    toast('Микрофон включён ✓', 'ok');
     return;
   }
   // Toggle mute state
   state.micMuted = !state.micMuted;
   state.localStream.getAudioTracks().forEach((t) => t.enabled = !state.micMuted);
   updateMediaControls();
+  updateCallGuide();
   toast(state.micMuted ? 'Микрофон выключен.' : 'Микрофон включён.', state.micMuted ? 'warn' : 'ok');
 }
 
@@ -965,12 +1004,15 @@ async function toggleCamera() {
     try { await ensureLocalMedia(true); } catch (e) { toast(e.message, 'bad'); return; }
     state.camOff = false;
     updateMediaControls();
+    updateCallGuide();
+    toast('Камера включена ✓', 'ok');
     return;
   }
   // Toggle camera state (disable track, don't destroy — faster re-enable)
   state.camOff = !state.camOff;
   state.localStream.getVideoTracks().forEach((t) => t.enabled = !state.camOff);
   updateMediaControls();
+  updateCallGuide();
   toast(state.camOff ? 'Камера выключена.' : 'Камера включена.', state.camOff ? 'warn' : 'ok');
 }
 async function checkConnection() {
@@ -1056,10 +1098,21 @@ async function deleteMessage(id) {
  * Media mail — record audio/video via MediaRecorder, store in IndexedDB
  * ============================================================ */
 function setRecordMode(mode) {
-  const target = document.querySelector(`input[name="recordMode"][value="${CSS.escape(mode)}"]`);
-  if (!target) return;
-  target.checked = true;
-  $$('.record-mode-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.mode === mode));
+  // Update the hidden radio input (this is what startRecording reads)
+  const target = document.querySelector(`input[name="recordMode"][value="${mode}"]`);
+  if (target) target.checked = true;
+  // Update the visible button states
+  $('#modeAudioBtn')?.classList.toggle('active', mode === 'audio');
+  $('#modeVideoBtn')?.classList.toggle('active', mode === 'video');
+  // If switching to video mode, show preview area; if audio, hide it
+  if (mode === 'audio') {
+    $('#recordPreview')?.classList.add('hidden');
+    $('#mailEmpty')?.classList.remove('hidden');
+    $('#mailEmpty p').textContent = 'Аудио режим — нажмите запись';
+  } else {
+    $('#mailEmpty')?.classList.remove('hidden');
+    $('#mailEmpty p').textContent = 'Видео режим — нажмите запись';
+  }
 }
 function pickMime(list) { return list.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''; }
 function startRecordTimer() {
@@ -1073,8 +1126,10 @@ function stopRecordTimer() { clearInterval(state.recordTimerId); $('#recordTimer
 
 async function startRecording() {
   try {
-    const mode = document.querySelector('input[name="recordMode"]:checked').value;
+    const modeInput = document.querySelector('input[name="recordMode"]:checked');
+    const mode = modeInput ? modeInput.value : 'audio';
     if (!window.MediaRecorder) throw new Error('Этот браузер не поддерживает MediaRecorder.');
+    toast(`Запрос доступа к ${mode === 'video' ? 'камере и микрофону' : 'микрофону'}…`, 'info');
     const stream = await getUserMediaCompat(mode === 'video'
       ? { video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 } }, audio: true }
       : { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
@@ -1086,20 +1141,37 @@ async function startRecording() {
       const blob = new Blob(state.recordChunks, { type: state.recorder.mimeType || (mode === 'video' ? 'video/webm' : 'audio/webm') });
       stream.getTracks().forEach((t) => t.stop());
       const note = $('#mailNote').value.trim();
-      const name = `${mode}-mail-${Date.now()}.${mode === 'video' ? 'webm' : 'webm'}`;
+      const name = `${mode}-mail-${Date.now()}.webm`;
+      toast('Сохранение в GitHub…', 'info');
       await saveMediaBlob(blob, 'mail', note, name, mode);
+      $('#recordPreview').srcObject = null;
       $('#recordPreview').classList.add('hidden');
+      $('#mailEmpty')?.classList.remove('hidden');
+      $('#mailEmpty p').textContent = mode === 'video' ? 'Видео режим — нажмите запись' : 'Аудио режим — нажмите запись';
       $('#mailNote').value = '';
       await refreshMail();
+      toast('Сообщение сохранено ✓', 'ok');
     };
     state.recorder.start(1000);
     state.recordStartedAt = Date.now();
     $('#startRecordBtn').disabled = true;
     $('#stopRecordBtn').disabled = false;
-    $('#recordPreview').classList.toggle('hidden', mode !== 'video');
-    if (mode === 'video') $('#recordPreview').srcObject = stream;
+    // Show live preview during recording
+    if (mode === 'video') {
+      $('#mailEmpty')?.classList.add('hidden');
+      $('#recordPreview').classList.remove('hidden');
+      $('#recordPreview').srcObject = stream;
+      $('#recordPreview').muted = true; // avoid feedback
+    } else {
+      $('#mailEmpty')?.classList.remove('hidden');
+      $('#mailEmpty p').textContent = '● Идёт аудиозапись…';
+    }
+    toast(`Запись начата (${mode === 'video' ? 'видео' : 'аудио'}) ✓`, 'ok');
     startRecordTimer();
-  } catch (e) { toast(`Запись: ${e.message}`, 'bad'); }
+  } catch (e) {
+    console.error('[recording] error', e);
+    toast(`Запись: ${e.message || e.name || 'ошибка'}`, 'bad');
+  }
 }
 function stopRecording() {
   if (state.recorder && state.recorder.state !== 'inactive') state.recorder.stop();
@@ -1732,9 +1804,8 @@ function bind() {
   $('#chatInput')?.addEventListener('keydown', (e) => { if (e.ctrlKey && e.key === 'Enter') sendMessage(); });
   bindClick('#startRecordBtn', startRecording);
   bindClick('#stopRecordBtn', stopRecording);
-  $$('.record-mode-btn').forEach((btn) => {
-    btn.addEventListener('click', () => { setRecordMode(btn.dataset.mode); showTipFor(btn); });
-  });
+  bindClick('#modeAudioBtn', () => { setRecordMode('audio'); toast('Аудио режим', 'info'); });
+  bindClick('#modeVideoBtn', () => { setRecordMode('video'); toast('Видео режим', 'info'); });
   initIconTooltips();
   bindClick('#refreshMailBtn', refreshMail);
   bindClick('#uploadFilesBtn', uploadFiles);
