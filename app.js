@@ -726,90 +726,75 @@ function renderPresence() {
 }
 
 /* ============================================================
- * Trystero — WebRTC signaling via Nostr relays (replaces PeerJS)
- *
- * Trystero auto-discovers peers in the same room via public Nostr relays.
- * No broker server, no peer ID registry in db.json, no manual discovery.
- * Chat sync uses Trystero's broadcast/onMessage for real-time delivery.
- * db.json polling remains for persistence (chat history, files, users).
+ * FB Signaling — Firebase Realtime Database + WebRTC
+ * Replaces Trystero. Uses Firebase REST API + SSE for peer discovery.
  * ============================================================ */
 
-let _trysteroMod = null;   // { joinRoom, selfId }
-let _room = null;          // Trystero room tuple
-let _peerNames = new Map(); // peerId -> displayName
-let _stopStreams = new Map(); // peerId -> stopStream function (from makePeer)
-let _firebaseApp = null;   // Firebase app instance (initialized by us)
+let _peerNames = new Map();
+let _stopStreams = new Map();
 
 async function ensureTrystero() {
-  if (_trysteroMod) return _trysteroMod;
-  try {
-    // Load Firebase COMPAT SDK (Trystero's bundled SDK needs compat API)
-    // Compat SDK supports regional database URLs (modular SDK doesn't)
-    await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js');
-    await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js');
-    _firebaseApp = firebase.initializeApp({
-      apiKey: 'AIzaSyASaMK7TbDW1ToJJF_kh_muZyEvAfyIjp4',
-      authDomain: 'family-call-477c7.firebaseapp.com',
-      databaseURL: 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app/',
-      projectId: 'family-call-477c7',
-      storageBucket: 'family-call-477c7.firebasestorage.app',
-      messagingSenderId: '842679997577',
-      appId: '1:842679997577:web:53a87c7949ad0ac3d9a258'
-    });
-    _trysteroMod = await import('https://cdn.jsdelivr.net/npm/trystero@0.21.0/firebase/+esm');
-    return _trysteroMod;
-  } catch (e) {
-    console.error('[trystero] failed to load', e);
-    setStatus($('#socketStatus'), 'Сигналинг: ошибка загрузки Trystero', 'bad');
-    return null;
-  }
+  // No async import needed — FB is a global from fb-signaling.js
+  return FB;
 }
 
 async function joinPeerRoom(room) {
-  // Leave any existing room FIRST and wait for relays to process departure
   if (_room) {
-    try { _room.leave(); } catch {}
-    _room = null;
-    if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; }
+    FB.leave();
     _peerNames.clear();
     for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
     _stopStreams.clear();
     state.remoteStreams.clear();
-    // Wait 2s for Nostr relays to process our departure before rejoining
-    setStatus($('#socketStatus'), 'Сигналинг: переподключение…', 'warn');
-    await new Promise((r) => setTimeout(r, 2000));
-    // Keep the same Trystero module (same selfId) — just rejoin the room.
-    // Trystero will re-subscribe to the relays and re-announce our presence.
+    await new Promise((r) => setTimeout(r, 500));
   }
-
-  const mod = await ensureTrystero();
-  if (!mod) return;
 
   state.currentRoom = room;
   state.currentRoomCode = room.code;
 
-  const config = {
-    appId: 'insightanalyticsca-call-v1',
-    rtcConfig: { iceServers: ICE_SERVERS },
-    // Pass our pre-initialized Firebase app (supports regional database URLs)
-    firebaseApp: _firebaseApp
+  await FB.joinRoom(room.code, {
+    displayName: state.user.displayName || state.user.username,
+    username: state.user.username
+  });
+
+  state.peer = { connected: true };
+  state.peerId = FB.selfId;
+
+  // Set up event handlers
+  FB.onPeerJoin = (peerId) => {
+    const peers = FB.getPeers();
+    const info = peers[peerId];
+    _peerNames.set(peerId, info?.displayName || 'Гость');
+    renderPresence();
+    updateConnectionIndicator();
+    // Send hello
+    if (state._sendHello) state._sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username }, peerId);
   };
 
-  try {
-    _room = mod.joinRoom(config, room.code);
-  } catch (e) {
-    console.error('[trystero] joinRoom failed', e);
-    setStatus($('#socketStatus'), 'Сигналинг: ошибка входа в комнату', 'bad');
-    return;
-  }
+  FB.onPeerLeave = (peerId) => {
+    _peerNames.delete(peerId);
+    state.remoteStreams.delete(peerId);
+    _stopStreams.delete(peerId);
+    renderPresence();
+    updateRemoteVideo();
+    updateConnectionIndicator();
+  };
 
-  // Set up custom actions for chat/hello/hangup/ring sync
-  const [sendChat, onChat] = _room.makeAction('chat');
-  const [sendHello, onHello] = _room.makeAction('hello');
-  const [sendHangup, onHangup] = _room.makeAction('hangup');
-  const [sendRing, onRing] = _room.makeAction('ring');
-  const [sendRingAccept, onRingAccept] = _room.makeAction('ringAccept');
-  const [sendRingDecline, onRingDecline] = _room.makeAction('ringDecline');
+  FB.onPeerStream = (stream, peerId) => {
+    state.remoteStreams.set(peerId, stream);
+    updateRemoteVideo();
+    setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
+    $('#pcState').textContent = `PC: connected (${state.remoteStreams.size})`;
+    $('#iceState').textContent = `ICE: connected`;
+    updateConnectionIndicator();
+  };
+
+  // Set up actions
+  const [sendChat, onChat] = FB.makeAction('chat');
+  const [sendHello, onHello] = FB.makeAction('hello');
+  const [sendHangup, onHangup] = FB.makeAction('hangup');
+  const [sendRing, onRing] = FB.makeAction('ring');
+  const [sendRingAccept, onRingAccept] = FB.makeAction('ringAccept');
+  const [sendRingDecline, onRingDecline] = FB.makeAction('ringDecline');
 
   state._sendChat = sendChat;
   state._sendHello = sendHello;
@@ -817,73 +802,30 @@ async function joinPeerRoom(room) {
   state._sendRing = sendRing;
   state._sendRingAccept = sendRingAccept;
   state._sendRingDecline = sendRingDecline;
-  state._room = _room;
-  state.peer = { connected: true };
-  state.peerId = mod.selfId;
+  state._room = FB;
 
   setStatus($('#socketStatus'), 'Сигналинг: подключён (Firebase) ✓', 'ok');
   updateConnectionIndicator();
 
-  // Announce our presence to anyone already in the room
+  // Announce presence
   sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
 
-  // Periodically re-announce our presence for the first 60 seconds.
-  // This handles reconnects: if another peer left and rejoined with a new
-  // peer ID, our initial onPeerJoin might have been missed by the relay.
-  // Periodic hellos ensure both sides eventually discover each other.
+  // Periodic re-announce for 60s
   if (state._helloInterval) clearInterval(state._helloInterval);
   state._helloInterval = setInterval(() => {
-    if (!_room) { clearInterval(state._helloInterval); return; }
+    if (!state._room) { clearInterval(state._helloInterval); return; }
     sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
     updateConnectionIndicator();
   }, 5000);
-  // Stop re-announcing after 60s (by then discovery should be complete)
   setTimeout(() => { if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; } }, 60000);
 
-  // New peer joined — announce ourselves to them
-  _room.onPeerJoin((peerId) => {
-    console.log('[trystero] peer joined:', peerId.slice(0, 12));
-    sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
-    updateConnectionIndicator();
-  });
-
-  // Peer left
-  _room.onPeerLeave((peerId) => {
-    console.log('[trystero] peer left:', peerId.slice(0, 12));
-    _peerNames.delete(peerId);
-    state.remoteStreams.delete(peerId);
-    _stopStreams.delete(peerId);
-    renderPresence();
-    updateRemoteVideo();
-    updateConnectionIndicator();
-  });
-
-  // Received a remote stream (peer is sending video/audio to us)
-  _room.onPeerStream((stream, peerId) => {
-    console.log('[trystero] stream from:', peerId.slice(0, 12));
-    state.remoteStreams.set(peerId, stream);
-    updateRemoteVideo();
-    setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
-    $('#pcState').textContent = `PC: connected (${state.remoteStreams.size})`;
-    $('#iceState').textContent = `ICE: connected`;
-    updateConnectionIndicator();
-    // Auto-send our stream back if we have one and haven't yet
-    if (state.localStream && !_stopStreams.has(peerId)) {
-      try {
-        const stop = _room.addStream(state.localStream, peerId);
-        _stopStreams.set(peerId, stop);
-      } catch (e) { console.warn('[auto addStream]', e); }
-    }
-  });
-
-  // Hello messages (presence/name exchange)
+  // Handlers
   onHello((data, peerId) => {
     _peerNames.set(peerId, data.displayName || data.username || 'Гость');
     renderPresence();
     updateConnectionIndicator();
   });
 
-  // Chat messages (real-time sync)
   onChat((data, peerId) => {
     (async () => {
       await ensureDb();
@@ -895,7 +837,6 @@ async function joinPeerRoom(room) {
     })();
   });
 
-  // Hangup
   onHangup((_data, peerId) => {
     state.remoteStreams.delete(peerId);
     _stopStreams.delete(peerId);
@@ -904,35 +845,27 @@ async function joinPeerRoom(room) {
     toast('Собеседник завершил звонок.');
   });
 
-  // Incoming call notification — other peer is calling us
   onRing((data, peerId) => {
     const callerName = data?.displayName || 'Участник';
-    // Don't show if already in a call with this peer
     if (state.remoteStreams.has(peerId)) return;
-    // Don't show if we're the one who initiated
     if (state._callingPeer === peerId) return;
     showIncomingCall(callerName, peerId);
   });
 
-  // Other peer accepted our call
   onRingAccept((_data, peerId) => {
     toast('Звонок принят ✓', 'ok');
     state._callingPeer = null;
   });
 
-  // Other peer declined our call
   onRingDecline((_data, peerId) => {
     toast('Звонок отклонён.', 'warn');
     state._callingPeer = null;
-    // Stop our stream to that peer
     const stop = _stopStreams.get(peerId);
     if (stop) { try { stop(); } catch {} _stopStreams.delete(peerId); }
   });
 }
 
-// Show incoming call dialog
 function showIncomingCall(callerName, peerId) {
-  // Don't show multiple dialogs
   if (document.getElementById('incomingCallDialog')) return;
   const dialog = document.createElement('div');
   dialog.id = 'incomingCallDialog';
@@ -949,77 +882,37 @@ function showIncomingCall(callerName, peerId) {
 
   document.getElementById('acceptCallBtn').onclick = async () => {
     dialog.remove();
-    // Send accept notification
-    if (state._sendRingAccept) state._sendRingAccept({});
-    // Auto-turn on camera + mic, then call back
+    if (state._sendRingAccept) state._sendRingAccept({}, peerId);
     toast('Подключение к звонку…', 'info');
     try {
-      await ensureLocalMedia(true).catch(async (e) => {
-        return ensureLocalMedia(false);
-      });
-      if (state.localStream && state._room) {
-        const stop = state._room.addStream(state.localStream, peerId);
-        _stopStreams.set(peerId, stop);
+      await ensureLocalMedia(true).catch(async () => ensureLocalMedia(false));
+      if (state.localStream) {
+        FB.setLocalStream(state.localStream);
+        await FB.startCall(peerId);
       }
       updateCallGuide();
     } catch (e) { toast('Не удалось подключиться: ' + e.message, 'bad'); }
   };
   document.getElementById('declineCallBtn').onclick = () => {
     dialog.remove();
-    if (state._sendRingDecline) state._sendRingDecline({});
+    if (state._sendRingDecline) state._sendRingDecline({}, peerId);
     toast('Звонок отклонён.', 'warn');
   };
-
-  // Auto-dismiss after 30s
-  setTimeout(() => { if (document.getElementById('incomingCallDialog')) { dialog.remove(); } }, 30000);
+  setTimeout(() => { if (document.getElementById('incomingCallDialog')) dialog.remove(); }, 30000);
 }
 
-// Broadcast a JSON object to all peers via the appropriate action
 function trysteroBroadcast(obj) {
   if (!state._room) return;
   try {
     if (obj.kind === 'chat-message' && state._sendChat) state._sendChat(obj);
     else if (obj.kind === 'hello' && state._sendHello) state._sendHello(obj);
     else if (obj.kind === 'hangup' && state._sendHangup) state._sendHangup(obj);
-  } catch (e) {
-    console.warn('[trystero] broadcast failed', e);
-  }
-}
-
-// Handle incoming Trystero messages
-function handleTrysteroMessage(data, peerId) {
-  switch (data.kind) {
-    case 'hello':
-      _peerNames.set(peerId, data.displayName || data.username || 'Гость');
-      renderPresence();
-      updateConnectionIndicator();
-      break;
-    case 'chat-message':
-      (async () => {
-        await ensureDb();
-        if (!_db.messages.some((m) => m.id === data.message.id)) {
-          _db.messages.push(data.message);
-          await saveDb(_db);
-          refreshMessages();
-        }
-      })();
-      break;
-    case 'hangup':
-      state.remoteStreams.delete(peerId);
-      const stop = _stopStreams.get(peerId);
-      if (stop) { try { stop(); } catch {} _stopStreams.delete(peerId); }
-      updateRemoteVideo();
-      updateConnectionIndicator();
-      toast('Собеседник завершил звонок.');
-      break;
-  }
+  } catch (e) { console.warn('[fb] broadcast failed', e); }
 }
 
 function disconnectPeer() {
-  if (_room) {
-    try { _room.leave(); } catch {}
-  }
-  _room = null;
+  if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; }
+  FB.leave();
   _peerNames.clear();
   for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
   _stopStreams.clear();
@@ -1030,25 +923,22 @@ function disconnectPeer() {
   state._sendChat = null;
   state._sendHello = null;
   state._sendHangup = null;
+  state._sendRing = null;
+  state._sendRingAccept = null;
+  state._sendRingDecline = null;
   setStatus($('#socketStatus'), 'Сигналинг: не подключён', 'warn');
   updateConnectionIndicator();
 }
 
 function updateRemoteVideo() {
   const streams = Array.from(state.remoteStreams.values());
-  if (streams.length === 0) {
-    $('#remoteVideo').srcObject = null;
-    return;
-  }
-  if (streams.length === 1) {
-    $('#remoteVideo').srcObject = streams[0];
-    return;
-  }
-  // Multi-party: mix into a single MediaStream
+  if (streams.length === 0) { $('#remoteVideo').srcObject = null; return; }
+  if (streams.length === 1) { $('#remoteVideo').srcObject = streams[0]; return; }
   const mixed = new MediaStream();
   for (const s of streams) s.getTracks().forEach((t) => mixed.addTrack(t));
   $('#remoteVideo').srcObject = mixed;
 }
+
 
 /* ============================================================
  * Local media & call controls
@@ -2125,10 +2015,10 @@ async function init() {
   setInterval(checkHealth, 60000);
   // Leave Trystero room on page close
   window.addEventListener('beforeunload', () => {
-    if (_room) { try { _room.leave(); } catch {} }
+    if (state._room) { try { FB.leave(); } catch {} }
   });
   window.addEventListener('pagehide', () => {
-    if (_room) { try { _room.leave(); } catch {} }
+    if (state._room) { try { FB.leave(); } catch {} }
   });
   // Show invite hint on login screen if there's a room in URL
   const params = new URLSearchParams(location.search);
