@@ -781,7 +781,7 @@ async function joinPeerRoom(room) {
     firebaseConfig: {
       apiKey: 'AIzaSyASaMK7TbDW1ToJJF_kh_muZyEvAfyIjp4',
       authDomain: 'family-call-477c7.firebaseapp.com',
-      databaseURL: 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app/',
+      databaseURL: 'https://family-call-477c7.firebaseio.com',
       projectId: 'family-call-477c7',
       storageBucket: 'family-call-477c7.firebasestorage.app',
       messagingSenderId: '842679997577',
