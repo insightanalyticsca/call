@@ -105,7 +105,9 @@ function setStatus(el, text, kind = '') { if (!el) return; el.textContent = text
 function updateConnectionIndicator() {
   const badge = $('#connQuality');
   if (!badge) return;
-  const peerCount = _peerNames.size;
+  // Count peers from BOTH _peerNames (got hello) AND Trystero getPeers() (discovered)
+  const trysteroPeers = state._room ? Object.keys(state._room.getPeers()).length : 0;
+  const peerCount = Math.max(_peerNames.size, trysteroPeers);
   const calls = state.remoteStreams.size;
   const hasPeer = !!state.peer;
   const hasRoom = !!state.currentRoom;
@@ -140,7 +142,9 @@ function updateCallGuide() {
   const hasRoom = !!state.currentRoom;
   const hasVideo = hasVideoTrack(state.localStream);
   const hasAudio = hasAudioTrack(state.localStream);
-  const peerCount = _peerNames.size;
+  // Count peers from BOTH _peerNames (got hello) AND Trystero getPeers() (discovered)
+  const trysteroPeers = state._room ? Object.keys(state._room.getPeers()).length : 0;
+  const peerCount = Math.max(_peerNames.size, trysteroPeers);
   const inCall = state.remoteStreams.size > 0;
 
   // Highlight the actual control button for the active step
