@@ -738,10 +738,24 @@ let _trysteroMod = null;   // { joinRoom, selfId }
 let _room = null;          // Trystero room tuple
 let _peerNames = new Map(); // peerId -> displayName
 let _stopStreams = new Map(); // peerId -> stopStream function (from makePeer)
+let _firebaseApp = null;   // Firebase app instance (initialized by us)
 
 async function ensureTrystero() {
   if (_trysteroMod) return _trysteroMod;
   try {
+    // Initialize Firebase ourselves with the regional database URL
+    // (Trystero's bundled SDK doesn't support regional URLs, so we pass firebaseApp)
+    const fb = await import('https://cdn.jsdelivr.net/npm/firebase@10.12.0/app/+esm');
+    const db = await import('https://cdn.jsdelivr.net/npm/firebase@10.12.0/database/+esm');
+    _firebaseApp = fb.initializeApp({
+      apiKey: 'AIzaSyASaMK7TbDW1ToJJF_kh_muZyEvAfyIjp4',
+      authDomain: 'family-call-477c7.firebaseapp.com',
+      databaseURL: 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app/',
+      projectId: 'family-call-477c7',
+      storageBucket: 'family-call-477c7.firebasestorage.app',
+      messagingSenderId: '842679997577',
+      appId: '1:842679997577:web:53a87c7949ad0ac3d9a258'
+    });
     _trysteroMod = await import('https://cdn.jsdelivr.net/npm/trystero@0.21.0/firebase/+esm');
     return _trysteroMod;
   } catch (e) {
@@ -777,16 +791,8 @@ async function joinPeerRoom(room) {
   const config = {
     appId: 'insightanalyticsca-call-v1',
     rtcConfig: { iceServers: ICE_SERVERS },
-    // Firebase Realtime Database for reliable peer discovery
-    firebaseConfig: {
-      apiKey: 'AIzaSyASaMK7TbDW1ToJJF_kh_muZyEvAfyIjp4',
-      authDomain: 'family-call-477c7.firebaseapp.com',
-      databaseURL: 'https://family-call-477c7.firebaseio.com',
-      projectId: 'family-call-477c7',
-      storageBucket: 'family-call-477c7.firebasestorage.app',
-      messagingSenderId: '842679997577',
-      appId: '1:842679997577:web:53a87c7949ad0ac3d9a258'
-    }
+    // Pass our pre-initialized Firebase app (supports regional database URLs)
+    firebaseApp: _firebaseApp
   };
 
   try {
