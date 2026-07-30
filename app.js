@@ -740,6 +740,7 @@ async function joinPeerRoom(room) {
   if (_room) {
     try { _room.leave(); } catch {}
     _room = null;
+    if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; }
     _peerNames.clear();
     for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
     _stopStreams.clear();
@@ -747,11 +748,8 @@ async function joinPeerRoom(room) {
     // Wait 2s for Nostr relays to process our departure before rejoining
     setStatus($('#socketStatus'), 'Сигналинг: переподключение…', 'warn');
     await new Promise((r) => setTimeout(r, 2000));
-    // Force a fresh Trystero module so we get a new selfId — the relays
-    // will treat us as a brand-new peer and re-announce our presence
-    _trysteroMod = null;
-    state.peer = null;
-    state.peerId = null;
+    // Keep the same Trystero module (same selfId) — just rejoin the room.
+    // Trystero will re-subscribe to the relays and re-announce our presence.
   }
 
   const mod = await ensureTrystero();
@@ -798,6 +796,19 @@ async function joinPeerRoom(room) {
 
   // Announce our presence to anyone already in the room
   sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
+
+  // Periodically re-announce our presence for the first 60 seconds.
+  // This handles reconnects: if another peer left and rejoined with a new
+  // peer ID, our initial onPeerJoin might have been missed by the relay.
+  // Periodic hellos ensure both sides eventually discover each other.
+  if (state._helloInterval) clearInterval(state._helloInterval);
+  state._helloInterval = setInterval(() => {
+    if (!_room) { clearInterval(state._helloInterval); return; }
+    sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
+    updateConnectionIndicator();
+  }, 5000);
+  // Stop re-announcing after 60s (by then discovery should be complete)
+  setTimeout(() => { if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; } }, 60000);
 
   // New peer joined — announce ourselves to them
   _room.onPeerJoin((peerId) => {
