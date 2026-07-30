@@ -1026,8 +1026,12 @@ async function startCall() {
   await ensureLocalMedia(true).catch(async (e) => {
     toast(`${e.message} Пробую только микрофон.`, 'warn');
     return ensureLocalMedia(false);
-  });
-  if (!state.localStream) return toast('Нет доступа к камере/микрофону.', 'bad');
+  }).catch(() => {});
+  // Even without local media, proceed with the call — the other side
+  // will send their video, and we can at least receive audio/video
+  if (!state.localStream) {
+    toast('Нет камеры/микрофона. Попытка звонка без медиа…', 'warn');
+  }
 
   // Send our stream to each peer via FB signaling
   let initiated = 0;
@@ -1035,7 +1039,7 @@ async function startCall() {
     if (_stopStreams.has(peerId)) continue;
     state._callingPeer = peerId;
     try {
-      FB.setLocalStream(state.localStream);
+      if (state.localStream) FB.setLocalStream(state.localStream);
       await FB.startCall(peerId);
       _stopStreams.set(peerId, () => FB.stopStream(peerId));
       initiated++;
