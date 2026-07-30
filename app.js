@@ -821,7 +821,7 @@ async function joinPeerRoom(room) {
   state.peer = { connected: true };
   state.peerId = mod.selfId;
 
-  setStatus($('#socketStatus'), 'Сигналинг: подключён (Nostr) ✓', 'ok');
+  setStatus($('#socketStatus'), 'Сигналинг: подключён (Firebase) ✓', 'ok');
   updateConnectionIndicator();
 
   // Announce our presence to anyone already in the room
