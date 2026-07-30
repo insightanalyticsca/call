@@ -228,10 +228,19 @@ const GH = (function () {
       b64 = blobData.content;
     }
     if (!b64) return null;
-    // Convert base64 to Blob
+    // GitHub's Git Blobs API returns base64 with newlines every 76 chars (RFC 2045).
+    // Browser atob() cannot handle newlines — it silently truncates at the first
+    // newline, giving you only the first ~2 seconds of a video. Strip ALL whitespace
+    // before decoding.
+    b64 = b64.replace(/\s+/g, '');
+    // Convert base64 to Blob (chunked to avoid call stack overflow on large files)
     const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const chunkSize = 8192;
+    for (let i = 0; i < bin.length; i += chunkSize) {
+      const end = Math.min(i + chunkSize, bin.length);
+      for (let j = i; j < end; j++) bytes[j] = bin.charCodeAt(j);
+    }
     return new Blob([bytes], { type: 'application/octet-stream' });
   }
 
