@@ -743,11 +743,11 @@ let _firebaseApp = null;   // Firebase app instance (initialized by us)
 async function ensureTrystero() {
   if (_trysteroMod) return _trysteroMod;
   try {
-    // Initialize Firebase ourselves with the regional database URL
-    // (Trystero's bundled SDK doesn't support regional URLs, so we pass firebaseApp)
-    const fb = await import('https://cdn.jsdelivr.net/npm/firebase@10.12.0/app/+esm');
-    const db = await import('https://cdn.jsdelivr.net/npm/firebase@10.12.0/database/+esm');
-    _firebaseApp = fb.initializeApp({
+    // Load Firebase COMPAT SDK (Trystero's bundled SDK needs compat API)
+    // Compat SDK supports regional database URLs (modular SDK doesn't)
+    await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js');
+    await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js');
+    _firebaseApp = firebase.initializeApp({
       apiKey: 'AIzaSyASaMK7TbDW1ToJJF_kh_muZyEvAfyIjp4',
       authDomain: 'family-call-477c7.firebaseapp.com',
       databaseURL: 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app/',
