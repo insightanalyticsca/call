@@ -131,37 +131,98 @@ function updateConnectionIndicator() {
 }
 
 /* ---------- Interactive call guide ---------- */
+// Narrates the call setup sequence and highlights the next button to press.
+// Steps: room -> camera -> mic -> wait -> call
 function updateCallGuide() {
   const guide = $('#callGuide');
   if (!guide) return;
 
   const hasRoom = !!state.currentRoom;
-  const hasPeer = !!state.peer;
-  const peerCount = _peerNames.size;
-  const hasLocalMedia = !!state.localStream;
   const hasVideo = hasVideoTrack(state.localStream);
   const hasAudio = hasAudioTrack(state.localStream);
+  const peerCount = _peerNames.size;
   const inCall = state.remoteStreams.size > 0;
 
-  // Determine step states: pending (0), active (1), done (2)
-  const steps = [
-    { label: 'Выбрать комнату', state: hasRoom ? 2 : 1 },
-    { label: 'Включить камеру', state: hasVideo ? 2 : (hasRoom ? 1 : 0) },
-    { label: 'Включить микрофон', state: hasAudio ? 2 : (hasVideo ? 1 : (hasRoom ? 0 : 0)) },
-    { label: 'Дождаться участников', state: peerCount > 0 ? 2 : (hasAudio ? 1 : 0) },
-    { label: 'Нажать «Позвонить»', state: inCall ? 2 : (peerCount > 0 ? 1 : 0) }
-  ];
+  // Highlight the actual control button for the active step
+  highlightActiveButton(hasRoom ? (hasVideo ? (hasAudio ? (peerCount > 0 ? (inCall ? null : 'call') : 'wait') : 'mic') : 'camera') : 'room');
 
-  // Hide guide if in active call (all done)
   if (inCall) {
-    guide.innerHTML = '<div class="guide-step done"><span class="step-num"></span><span>✓ В эфире — связь установлена</span></div>';
+    guide.innerHTML = '<div class="guide-narration done">✓ В эфире — связь установлена</div>';
     return;
   }
 
-  guide.innerHTML = steps.map((s, i) => {
-    const cls = s.state === 2 ? 'done' : (s.state === 1 ? 'active' : '');
-    return `<div class="guide-step ${cls}"><span class="step-num"><span class="num-text">${i + 1}</span></span><span>${s.label}</span></div>`;
+  // Build step list
+  const steps = [
+    { id: 'room', label: 'Выбрать комнату', done: hasRoom },
+    { id: 'camera', label: 'Включить камеру', done: hasVideo },
+    { id: 'mic', label: 'Включить микрофон', done: hasAudio },
+    { id: 'wait', label: 'Дождаться участников', done: peerCount > 0 },
+    { id: 'call', label: 'Нажать «Позвонить»', done: false }
+  ];
+
+  // Find the active (next) step
+  const activeStep = steps.find((s) => !s.done);
+
+  // Build narration text
+  let narration = '';
+  if (!hasRoom) {
+    narration = 'Выберите комнату из списка ниже или создайте новую';
+  } else if (!hasVideo) {
+    narration = `Комната ${state.currentRoom.code} готова. Включите камеру ↓`;
+  } else if (!hasAudio) {
+    narration = 'Камера включена. Теперь включите микрофон ↓';
+  } else if (peerCount === 0) {
+    narration = 'Камера и микрофон готовы. Ждём других участников… поделитесь ссылкой-приглашением';
+  } else {
+    narration = `${peerCount} участник(ов) в комнате. Нажмите «Позвонить» ↓`;
+  }
+
+  // Build room picker if no room selected
+  let roomPicker = '';
+  if (!hasRoom && state.rooms.length > 0) {
+    roomPicker = '<div class="guide-rooms">' +
+      state.rooms.map((r) => `<button class="guide-room-btn" data-room-id="${r.id}"><span data-icon="video"></span><span>${escapeHtml(r.title)}</span><span class="guide-room-code">${escapeHtml(r.code)}</span></button>`).join('') +
+      '</div>';
+  } else if (!hasRoom) {
+    roomPicker = '<div class="guide-rooms-empty">Нет комнат. Нажмите кнопку 🎥 вверху слева, чтобы создать.</div>';
+  }
+
+  // Render steps
+  const stepsHTML = steps.map((s, i) => {
+    const cls = s.done ? 'done' : (s === activeStep ? 'active' : '');
+    return `<div class="guide-step ${cls}"><span class="step-num">${s.done ? '✓' : (i + 1)}</span><span>${s.label}</span></div>`;
   }).join('');
+
+  guide.innerHTML = `
+    <div class="guide-narration ${activeStep ? activeStep.id : ''}">${narration}</div>
+    ${roomPicker}
+    <div class="guide-steps">${stepsHTML}</div>
+  `;
+
+  // Bind room picker clicks
+  guide.querySelectorAll('.guide-room-btn').forEach((btn) => {
+    btn.onclick = () => selectRoom(btn.dataset.roomId);
+  });
+}
+
+// Highlight the actual call control button for the active step
+function highlightActiveButton(stepId) {
+  const buttons = {
+    room: '#openRoomsBtn',
+    camera: '#cameraBtn',
+    mic: '#muteBtn',
+    call: '#callBtn'
+  };
+  // Clear all highlights
+  Object.values(buttons).forEach((sel) => {
+    const el = $(sel);
+    if (el) el.classList.remove('guide-highlight');
+  });
+  // Highlight the active one
+  if (stepId && buttons[stepId]) {
+    const el = $(buttons[stepId]);
+    if (el) el.classList.add('guide-highlight');
+  }
 }
 function isLocalOrigin() { return ['localhost', '127.0.0.1', '::1'].includes(location.hostname); }
 function randomId(prefix = '') { return `${prefix}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
@@ -453,7 +514,7 @@ async function refreshRooms() {
 }
 function renderRooms() {
   const box = $('#roomsList');
-  if (!state.rooms.length) { box.className = 'list empty'; box.textContent = 'Нет комнат.'; return; }
+  if (!state.rooms.length) { box.className = 'list empty'; box.textContent = 'Нет комнат.'; updateCallGuide(); return; }
   box.className = 'list';
   box.innerHTML = state.rooms.map((r) => `
     <div class="room-item ${state.currentRoom?.id === r.id ? 'selected' : ''}" data-room-id="${r.id}">
@@ -470,6 +531,7 @@ function renderRooms() {
   box.querySelectorAll('.select-room').forEach((b) => b.onclick = () => selectRoom(b.dataset.id));
   box.querySelectorAll('.invite-room').forEach((b) => b.onclick = () => makeInvite(b.dataset.id, true));
   box.querySelectorAll('.delete-room').forEach((b) => b.onclick = () => deleteRoom(b.dataset.id));
+  updateCallGuide();
 }
 async function createRoom() {
   const title = $('#roomTitle').value.trim() || 'Семейный звонок';
