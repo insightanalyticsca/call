@@ -753,7 +753,15 @@ async function joinPeerRoom(room) {
 
   const config = {
     appId: 'insightanalyticsca-call-v1',
-    rtcConfig: { iceServers: ICE_SERVERS }
+    rtcConfig: { iceServers: ICE_SERVERS },
+    // Explicit reliable Nostr relays (Trystero's defaults include some that block posts)
+    relays: [
+      'wss://relay.damus.io',
+      'wss://nos.lol',
+      'wss://relay.nostr.net',
+      'wss://nostr-pub.wellorder.net',
+      'wss://relay.current.fyi'
+    ]
   };
 
   try {
