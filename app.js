@@ -172,7 +172,7 @@ function updateCallGuide() {
   } else if (!hasAudio) {
     narration = 'Камера включена. Теперь включите микрофон ↓';
   } else if (peerCount === 0) {
-    narration = 'Камера и микрофон готовы. Ждём других участников… поделитесь ссылкой-приглашением';
+    narration = 'Камера и микрофон готовы. Ждём других участников…';
   } else {
     narration = `${peerCount} участник(ов) в комнате. Нажмите «Позвонить» ↓`;
   }
@@ -986,10 +986,18 @@ async function startCall() {
   if (!state.currentRoom) return toast('Сначала выберите комнату.', 'warn');
   if (!state._room) return toast('Сигналинг не подключён.', 'bad');
 
-  const peers = state._room.getPeers();
-  const peerIds = Object.keys(peers);
+  // Wait for Trystero to discover peers (can take 5-10s after room join)
+  let peerIds = Object.keys(state._room.getPeers());
   if (peerIds.length === 0) {
-    return toast('В комнате нет других участников. Поделитесь ссылкой-приглашением.', 'warn');
+    toast('Поиск участников в комнате…', 'info');
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      peerIds = Object.keys(state._room.getPeers());
+      if (peerIds.length > 0) break;
+    }
+  }
+  if (peerIds.length === 0) {
+    return toast('В комнате нет других участников. Убедитесь, что оба выбрали одну комнату.', 'warn');
   }
 
   await ensureLocalMedia(true).catch(async (e) => {
@@ -1913,7 +1921,7 @@ function bind() {
     await new Promise((r) => setTimeout(r, 1500));
     updateConnectionIndicator();
     const n = _peerNames.size;
-    toast(n ? `Найдено участников: ${n}` : 'Участники не найдены. Подождите или поделитесь ссылкой.', n ? 'ok' : 'warn');
+    toast(n ? `Найдено участников: ${n}` : 'Участники не найдены. Убедитесь, что оба выбрали одну комнату.', n ? 'ok' : 'warn');
   });
   bindClick('#sendChatBtn', sendMessage);
   bindClick('#refreshChatBtn', refreshMessages);
