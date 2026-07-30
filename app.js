@@ -1072,11 +1072,18 @@ function stopRecording() {
 function kindForFile(file) {
   const t = (file.type || '').toLowerCase();
   const n = (file.name || '').toLowerCase();
+  // MIME-based detection (primary)
   if (t.startsWith('video/')) return 'video';
   if (t.startsWith('audio/')) return 'audio';
   if (t.startsWith('image/')) return 'image';
-  if (t === 'application/pdf' || n.endsWith('.pdf')) return 'pdf';
-  if (t.startsWith('text/') || /\.(txt|md|log|csv|json|js|html|css|xml|yml|yaml)$/.test(n)) return 'text';
+  if (t === 'application/pdf') return 'pdf';
+  if (t.startsWith('text/')) return 'text';
+  // Extension-based fallback (when browser doesn't set MIME)
+  if (/\.(mp4|mov|avi|mkv|webm|m4v|mpg|mpeg|m2ts|3gp|flv|wmv|ts)$/.test(n)) return 'video';
+  if (/\.(mp3|wav|ogg|aac|flac|m4a|opus|wma|aiff)$/.test(n)) return 'audio';
+  if (/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic|heif|tiff|tif|avif)$/.test(n)) return 'image';
+  if (n.endsWith('.pdf')) return 'pdf';
+  if (/\.(txt|md|log|csv|json|js|html|css|xml|yml|yaml)$/.test(n)) return 'text';
   return 'other';
 }
 async function saveMediaBlob(blob, type, note, originalName, mode) {
@@ -1146,7 +1153,7 @@ function downloadStats(m) {
 function renderMediaList(box, items) {
   if (!items.length) { box.className = 'media-list empty'; box.textContent = 'Пока пусто.'; return; }
   box.className = 'media-list';
-  // Render with a placeholder for the file URL; lazily fetch on click/preview
+  // Render with a placeholder that will be replaced by the inline player
   box.innerHTML = items.map((m) => `
     <div class="media-item" data-id="${m.id}">
       <div class="media-top">
@@ -1158,7 +1165,7 @@ function renderMediaList(box, items) {
         </div>
       </div>
       ${m.note ? `<div class="media-note">${escapeHtml(m.note)}</div>` : ''}
-      <div class="media-placeholder" data-id="${m.id}"><span class="meta">Нажмите «Открыть» для просмотра</span></div>
+      <div class="media-placeholder" data-id="${m.id}"><span class="meta">Загрузка…</span></div>
       <div class="media-actions">
         <button class="small icon-action preview-media" data-id="${m.id}" title="Открыть" aria-label="Открыть"><span data-icon="eye"></span></button>
         <button class="small icon-action download-media" data-id="${m.id}" title="Скачать оригинал" aria-label="Скачать оригинал"><span data-icon="download"></span></button>
@@ -1169,8 +1176,13 @@ function renderMediaList(box, items) {
   box.querySelectorAll('.preview-media').forEach((b) => b.onclick = () => openPreview(items.find((m) => m.id === b.dataset.id)));
   box.querySelectorAll('.download-media').forEach((b) => b.onclick = () => downloadMedia(items.find((m) => m.id === b.dataset.id)));
   box.querySelectorAll('.delete-media').forEach((b) => b.onclick = () => deleteMedia(b.dataset.id));
+  // Auto-load inline players for all media types (video, audio, image, pdf)
+  box.querySelectorAll('.media-placeholder').forEach((holder) => {
+    const m = items.find((x) => x.id === holder.dataset.id);
+    if (m) inlinePlayerInto(m, holder);
+  });
 }
-// Inline player is now async-loaded into the placeholder div
+// Inline player — auto-loads inline preview/player for all media types
 async function inlinePlayerInto(m, holder) {
   if (!holder) return;
   holder.innerHTML = '<span class="meta">Загрузка…</span>';
@@ -1178,9 +1190,10 @@ async function inlinePlayerInto(m, holder) {
     const url = await GH.getFileUrl(m.id, m.mime);
     if (!url) { holder.innerHTML = '<span class="meta warn-text">Файл не найден.</span>'; return; }
     m._url = url;
+    const lowerName = m.originalName.toLowerCase();
+    const isHeic = lowerName.endsWith('.heic') || lowerName.endsWith('.heif') || m.mime === 'image/heic' || m.mime === 'image/heif';
     if (m.kind === 'audio') holder.innerHTML = `<div class="media-player"><audio controls src="${url}"></audio></div>`;
     else if (m.kind === 'video') {
-      const isMov = (m.mime === 'video/quicktime' || m.originalName.toLowerCase().endsWith('.mov'));
       holder.innerHTML = `<div class="media-player"><video controls playsinline src="${url}"></video></div>`;
       const v = holder.querySelector('video');
       v.addEventListener('error', () => {
@@ -1191,9 +1204,33 @@ async function inlinePlayerInto(m, holder) {
         renderIcons(holder);
       });
     }
-    else if (m.kind === 'image') holder.innerHTML = `<div class="media-player"><img src="${url}" alt="${escapeHtml(m.originalName)}" loading="lazy" style="max-width:100%;border-radius:14px"></div>`;
+    else if (m.kind === 'image' && !isHeic) {
+      holder.innerHTML = `<div class="media-player"><img src="${url}" alt="${escapeHtml(m.originalName)}" loading="lazy" style="max-width:100%;border-radius:14px"></div>`;
+      const img = holder.querySelector('img');
+      img.addEventListener('error', () => {
+        holder.innerHTML = `<div class="media-placeholder" style="padding:20px;text-align:center">
+          <span class="meta" style="display:block;margin-bottom:8px">Изображение не поддерживается</span>
+          <a class="button small" href="${url}" download="${escapeHtml(m.originalName)}"><span data-icon="download"></span><span>Скачать оригинал</span></a>
+        </div>`;
+        renderIcons(holder);
+      });
+    }
+    else if (m.kind === 'image' && isHeic) {
+      // HEIC not supported by Chrome/Firefox — show download link
+      holder.innerHTML = `<div class="media-placeholder" style="padding:16px;text-align:center">
+        <span class="meta" style="display:block;margin-bottom:8px">HEIC фото (iPhone) — не отображается в браузере</span>
+        <a class="button small" href="${url}" download="${escapeHtml(m.originalName)}"><span data-icon="download"></span><span>Скачать оригинал</span></a>
+      </div>`;
+      renderIcons(holder);
+    }
     else if (m.kind === 'pdf') holder.innerHTML = `<div class="media-player"><iframe src="${url}"></iframe></div>`;
-    else holder.innerHTML = '';
+    else {
+      // 'other' or 'text' — show download button
+      holder.innerHTML = `<div class="media-placeholder" style="padding:16px;text-align:center">
+        <a class="button small" href="${url}" download="${escapeHtml(m.originalName)}"><span data-icon="download"></span><span>Скачать ${escapeHtml(m.originalName)}</span></a>
+      </div>`;
+      renderIcons(holder);
+    }
   } catch (e) { holder.innerHTML = `<span class="meta warn-text">Ошибка: ${escapeHtml(e.message)}</span>`; }
 }
 async function openPreview(m) {
