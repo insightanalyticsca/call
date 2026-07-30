@@ -736,17 +736,26 @@ async function ensureTrystero() {
 }
 
 async function joinPeerRoom(room) {
-  const mod = await ensureTrystero();
-  if (!mod) return;
-
-  // Leave any existing room first
+  // Leave any existing room FIRST and wait for relays to process departure
   if (_room) {
     try { _room.leave(); } catch {}
+    _room = null;
+    _peerNames.clear();
+    for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
+    _stopStreams.clear();
+    state.remoteStreams.clear();
+    // Wait 2s for Nostr relays to process our departure before rejoining
+    setStatus($('#socketStatus'), 'Сигналинг: переподключение…', 'warn');
+    await new Promise((r) => setTimeout(r, 2000));
+    // Force a fresh Trystero module so we get a new selfId — the relays
+    // will treat us as a brand-new peer and re-announce our presence
+    _trysteroMod = null;
+    state.peer = null;
+    state.peerId = null;
   }
-  _peerNames.clear();
-  for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
-  _stopStreams.clear();
-  state.remoteStreams.clear();
+
+  const mod = await ensureTrystero();
+  if (!mod) return;
 
   state.currentRoom = room;
   state.currentRoomCode = room.code;
