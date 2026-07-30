@@ -354,6 +354,18 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
   animation: avatarFloat 4s ease-in-out infinite;
 }
 .mail-empty p { margin: 0; font-size: 13px; }
+.mail-guide {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 320px;
+}
+.mail-guide .guide-narration { font-size: 12px; }
+.mail-guide .guide-steps { gap: 4px; }
+.mail-guide .guide-step { font-size: 10px; padding: 4px 8px; }
+.mail-guide .guide-step .step-num { width: 16px; height: 16px; font-size: 9px; }
 #recordPreview {
   position: absolute;
   inset: 0;

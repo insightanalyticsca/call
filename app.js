@@ -479,6 +479,8 @@ function tab(name) {
   try { localStorage.setItem('call-static-active-tab', name); } catch {}
   // Lazy-render stats when the stats tab is opened
   if (name === 'stats') { refreshStats().catch(() => {}); }
+  // Initialize mail guide when mail tab opens
+  if (name === 'mail') { updateMailGuide(); }
 }
 
 /* ============================================================
@@ -1166,15 +1168,58 @@ function setRecordMode(mode) {
   // Update the visible button states
   $('#modeAudioBtn')?.classList.toggle('active', mode === 'audio');
   $('#modeVideoBtn')?.classList.toggle('active', mode === 'video');
-  // If switching to video mode, show preview area; if audio, hide it
-  if (mode === 'audio') {
-    $('#recordPreview')?.classList.add('hidden');
-    $('#mailEmpty')?.classList.remove('hidden');
-    $('#mailEmpty p').textContent = 'Аудио режим — нажмите запись';
-  } else {
-    $('#mailEmpty')?.classList.remove('hidden');
-    $('#mailEmpty p').textContent = 'Видео режим — нажмите запись';
+  updateMailGuide();
+}
+
+/* ---------- Interactive mail guide ---------- */
+// Narrates the recording sequence and highlights the next button to press.
+// Steps: choose mode (audio/video) -> record -> stop
+function updateMailGuide() {
+  const guide = $('#mailGuide');
+  if (!guide) return;
+
+  const isRecording = state.recorder && state.recorder.state === 'recording';
+  const modeInput = document.querySelector('input[name="recordMode"]:checked');
+  const mode = modeInput ? modeInput.value : 'audio';
+
+  // Clear all button highlights
+  ['#modeAudioBtn', '#modeVideoBtn', '#startRecordBtn', '#stopRecordBtn'].forEach((sel) => {
+    $(sel)?.classList.remove('guide-highlight');
+  });
+
+  if (isRecording) {
+    guide.innerHTML = '<div class="guide-narration done">● Идёт запись… нажмите «Стоп» чтобы завершить</div>';
+    $('#stopRecordBtn')?.classList.add('guide-highlight');
+    return;
   }
+
+  // Build steps
+  const steps = [
+    { id: 'mode', label: 'Выбрать режим', done: true }, // mode is always chosen (defaults to audio)
+    { id: 'record', label: 'Нажать «Записать»', done: false },
+    { id: 'stop', label: 'Нажать «Стоп»', done: false }
+  ];
+
+  let narration = '';
+  let highlightBtn = '';
+  if (mode === 'audio') {
+    narration = 'Аудио режим. Нажмите «Записать» ↓';
+    highlightBtn = '#startRecordBtn';
+  } else {
+    narration = 'Видео режим. Нажмите «Записать» ↓';
+    highlightBtn = '#startRecordBtn';
+  }
+
+  const stepsHTML = steps.map((s, i) => {
+    const cls = s.done ? 'done' : (i === 1 ? 'active' : '');
+    return `<div class="guide-step ${cls}"><span class="step-num">${s.done ? '✓' : (i + 1)}</span><span>${s.label}</span></div>`;
+  }).join('');
+
+  guide.innerHTML = `
+    <div class="guide-narration ${mode}">${narration}</div>
+    <div class="guide-steps">${stepsHTML}</div>
+  `;
+  if (highlightBtn) $(highlightBtn)?.classList.add('guide-highlight');
 }
 function pickMime(list) { return list.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''; }
 function startRecordTimer() {
@@ -1209,9 +1254,9 @@ async function startRecording() {
       $('#recordPreview').srcObject = null;
       $('#recordPreview').classList.add('hidden');
       $('#mailEmpty')?.classList.remove('hidden');
-      $('#mailEmpty p').textContent = mode === 'video' ? 'Видео режим — нажмите запись' : 'Аудио режим — нажмите запись';
       $('#mailNote').value = '';
       await refreshMail();
+      updateMailGuide();
       toast('Сообщение сохранено ✓', 'ok');
     };
     state.recorder.start(1000);
@@ -1225,9 +1270,10 @@ async function startRecording() {
       $('#recordPreview').srcObject = stream;
       $('#recordPreview').muted = true; // avoid feedback
     } else {
+      // Keep the guide visible during audio recording (it shows the "stop" narration)
       $('#mailEmpty')?.classList.remove('hidden');
-      $('#mailEmpty p').textContent = '● Идёт аудиозапись…';
     }
+    updateMailGuide();
     toast(`Запись начата (${mode === 'video' ? 'видео' : 'аудио'}) ✓`, 'ok');
     startRecordTimer();
   } catch (e) {
@@ -1240,6 +1286,7 @@ function stopRecording() {
   $('#startRecordBtn').disabled = false;
   $('#stopRecordBtn').disabled = true;
   stopRecordTimer();
+  updateMailGuide();
 }
 
 /* ============================================================
