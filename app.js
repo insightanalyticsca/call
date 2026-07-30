@@ -822,9 +822,29 @@ function updateRemoteVideo() {
 function updateMediaControls() {
   const hasStream = !!state.localStream;
   const hasVideo = hasVideoTrack(state.localStream);
-  $('#muteBtn').disabled = !hasStream || !hasAudioTrack(state.localStream);
-  $('#cameraBtn').disabled = !hasStream;
-  $('#cameraBtn').innerHTML = `${icon('video')}<span>${hasVideo ? (state.camOff ? 'Включить видео' : 'Видео') : 'Добавить камеру'}</span>`;
+  const hasAudio = hasAudioTrack(state.localStream);
+  // Camera button: shows "Камера" when off, "Выкл камеру" when on
+  const camBtn = $('#cameraBtn');
+  if (camBtn) {
+    if (hasVideo && !state.camOff) {
+      camBtn.innerHTML = `${icon('video')}<span>Выкл камеру</span>`;
+      camBtn.classList.add('active');
+    } else {
+      camBtn.innerHTML = `${icon('video')}<span>Камера</span>`;
+      camBtn.classList.remove('active');
+    }
+  }
+  // Mic button: shows "Микрофон" when off, "Выкл микро" when on
+  const micBtn = $('#muteBtn');
+  if (micBtn) {
+    if (hasAudio && !state.micMuted) {
+      micBtn.innerHTML = `${icon('microphone')}<span>Выкл микро</span>`;
+      micBtn.classList.add('active');
+    } else {
+      micBtn.innerHTML = `${icon('microphone')}<span>Микрофон</span>`;
+      micBtn.classList.remove('active');
+    }
+  }
 }
 async function ensureLocalMedia(video = true) {
   if (state.localStream && (!video || hasVideoTrack(state.localStream))) {
@@ -916,20 +936,42 @@ function resetCall() {
   updateMediaControls();
 }
 
-function toggleMute() {
-  if (!state.localStream) return;
-  state.micMuted = !state.micMuted;
-  state.localStream.getAudioTracks().forEach((t) => t.enabled = !state.micMuted);
-  $('#muteBtn').textContent = state.micMuted ? 'Включить микрофон' : 'Микрофон';
-}
-async function toggleCamera() {
-  if (!state.localStream || !hasVideoTrack(state.localStream)) {
-    try { await ensureLocalMedia(true); } catch (e) { toast(e.message, 'bad'); }
+// Single toggle button for microphone:
+// - If no audio stream: turn mic ON
+// - If mic ON: turn mic OFF (mute)
+// - If mic OFF (muted): turn mic ON (unmute)
+async function toggleMute() {
+  // No stream yet — start audio only
+  if (!state.localStream || !hasAudioTrack(state.localStream)) {
+    try { await ensureLocalMedia(false); } catch (e) { toast(e.message, 'bad'); return; }
+    state.micMuted = false;
+    updateMediaControls();
     return;
   }
+  // Toggle mute state
+  state.micMuted = !state.micMuted;
+  state.localStream.getAudioTracks().forEach((t) => t.enabled = !state.micMuted);
+  updateMediaControls();
+  toast(state.micMuted ? 'Микрофон выключен.' : 'Микрофон включён.', state.micMuted ? 'warn' : 'ok');
+}
+
+// Single toggle button for camera:
+// - If no video stream: turn camera ON
+// - If camera ON: turn camera OFF (disable video track, keep audio)
+// - If camera OFF: turn camera ON (re-enable video track)
+async function toggleCamera() {
+  // No video stream yet — start camera + mic
+  if (!state.localStream || !hasVideoTrack(state.localStream)) {
+    try { await ensureLocalMedia(true); } catch (e) { toast(e.message, 'bad'); return; }
+    state.camOff = false;
+    updateMediaControls();
+    return;
+  }
+  // Toggle camera state (disable track, don't destroy — faster re-enable)
   state.camOff = !state.camOff;
   state.localStream.getVideoTracks().forEach((t) => t.enabled = !state.camOff);
   updateMediaControls();
+  toast(state.camOff ? 'Камера выключена.' : 'Камера включена.', state.camOff ? 'warn' : 'ok');
 }
 async function checkConnection() {
   const peers = state._room ? state._room.getPeers() : {};
@@ -1671,11 +1713,9 @@ function bind() {
     catch { toast('Скопируйте ссылку вручную.', 'warn'); }
   });
   bindClick('#leaveRoomBtn', leaveRoom);
-  bindClick('#startVideoBtn', () => ensureLocalMedia(true).catch((e) => toast(e.message, 'bad')));
-  bindClick('#startAudioBtn', () => ensureLocalMedia(false).catch((e) => toast(e.message, 'bad')));
   bindClick('#callBtn', () => startCall().catch((e) => toast(e.message, 'bad')));
   bindClick('#hangupBtn', () => hangup(true));
-  bindClick('#muteBtn', toggleMute);
+  bindClick('#muteBtn', () => toggleMute().catch((e) => toast(e.message, 'bad')));
   bindClick('#cameraBtn', () => toggleCamera().catch((e) => toast(e.message, 'bad')));
   bindClick('#checkConnectionBtn', checkConnection);
   bindClick('#refreshPeersBtn', async () => {

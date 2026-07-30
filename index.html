@@ -7,11 +7,27 @@
   <title>Семейная связь</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="styles.css?v=20260727-trys7" />
+  <link rel="stylesheet" href="styles.css?v=20260727-trys8" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <script>
+    // Synchronously restore session BEFORE page renders — prevents login screen flash on reload
+    (function() {
+      try {
+        var s = localStorage.getItem('call-static-session-v1');
+        if (s) {
+          var session = JSON.parse(s);
+          if (session.expiresAt && new Date(session.expiresAt) > new Date()) {
+            document.documentElement.className = 'is-logged-in';
+          } else {
+            localStorage.removeItem('call-static-session-v1');
+          }
+        }
+      } catch (e) {}
+    })();
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" defer></script>
-  <script src="gh-store.js?v=20260727-trys7" defer></script>
-  <script src="app.js?v=20260727-trys7" defer></script>
+  <script src="gh-store.js?v=20260727-trys8" defer></script>
+  <script src="app.js?v=20260727-trys8" defer></script>
 </head>
 <body class="auth-only">
   <noscript>Для работы приложения нужен JavaScript.</noscript>
@@ -79,12 +95,10 @@
         </div>
 
         <div class="call-controls overlay-controls">
-          <button id="startVideoBtn" class="call-action circle-control" data-tip="Камера"><span data-icon="video"></span><span>Камера</span></button>
-          <button id="startAudioBtn" class="call-action circle-control" data-tip="Микрофон"><span data-icon="microphone"></span><span>Только микрофон</span></button>
-          <button id="callBtn" class="call-action circle-control primary-control" data-tip="Позвонить"><span data-icon="phone"></span><span>Позвонить</span></button>
-          <button id="muteBtn" class="call-action circle-control" data-tip="Mute"><span data-icon="microphone"></span><span>Микрофон</span></button>
-          <button id="cameraBtn" class="call-action circle-control" data-tip="Видео"><span data-icon="video"></span><span>Видео</span></button>
-          <button id="hangupBtn" class="call-action circle-control end-control" data-tip="Завершить"><span data-icon="phone-slash"></span><span>Завершить</span></button>
+          <button id="cameraBtn" class="call-action circle-control" data-tip="Камера" title="Камера" aria-label="Камера"><span data-icon="video"></span><span>Камера</span></button>
+          <button id="muteBtn" class="call-action circle-control" data-tip="Микрофон" title="Микрофон" aria-label="Микрофон"><span data-icon="microphone"></span><span>Микрофон</span></button>
+          <button id="callBtn" class="call-action circle-control primary-control" data-tip="Позвонить" title="Позвонить" aria-label="Позвонить"><span data-icon="phone"></span><span>Позвонить</span></button>
+          <button id="hangupBtn" class="call-action circle-control end-control" data-tip="Завершить" title="Завершить" aria-label="Завершить"><span data-icon="phone-slash"></span><span>Завершить</span></button>
         </div>
         <button id="showUiBtn" class="show-ui hidden">Показать управление</button>
       </div>

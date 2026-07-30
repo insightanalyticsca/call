@@ -99,10 +99,17 @@ body::after {
 }
 
 /* ---------- Auth visibility ---------- */
+/* Auth visibility — html.is-logged-in is set synchronously in <head> before
+   page render to prevent login screen flash on reload. body.is-logged-in is
+   set later by JS. */
 body.auth-only #appScreen { display: none !important; }
 body.auth-only #loginCard { display: flex !important; }
-body.is-logged-in #loginCard { display: none !important; }
-body.is-logged-in #appScreen { display: block !important; }
+body.is-logged-in #loginCard,
+html.is-logged-in #loginCard { display: none !important; }
+body.is-logged-in #appScreen,
+html.is-logged-in #appScreen { display: block !important; }
+html.is-logged-in body.auth-only #loginCard { display: none !important; }
+html.is-logged-in body.auth-only #appScreen { display: block !important; }
 .hidden { display: none !important; }
 
 /* ---------- Buttons ---------- */
@@ -514,6 +521,7 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
 .call-controls.overlay-controls .call-action [data-icon] i { width: 22px !important; height: 22px !important; font-size: 22px !important; }
 .call-controls.overlay-controls .call-action span:not([data-icon]) { font-size: 10px; white-space: nowrap; }
 .call-action:hover { background: var(--glass-hover); }
+.call-action.active { background: var(--success-grad) !important; color: #021307 !important; box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4); border-color: transparent; }
 .primary-control { background: var(--success-grad) !important; color: #021307 !important; box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4); }
 .end-control { background: var(--danger-grad) !important; color: white !important; box-shadow: 0 4px 16px rgba(239, 68, 68, 0.4); }
 
