@@ -1,12 +1,11 @@
 'use strict';
 
 /* ============================================================
- * fb-signaling.js — Firebase Realtime Database signaling (v2)
+ * fb-signaling.js — Firebase Realtime Database signaling (v3)
  *
- * Fixes:
- *   - Heartbeat + stale peer cleanup (no more ghost peers on reconnect)
- *   - Proper WebRTC: perfect negotiation, auto-answer, ICE trickle
- *   - Signal cleanup (delete after processing)
+ * - Pending offers: offer stored but not processed until user accepts
+ * - Both sides see video immediately on accept
+ * - ICE keepalive: monitors connection, renegotiates on failure
  * ============================================================ */
 
 const FB = (function () {
@@ -22,7 +21,7 @@ const FB = (function () {
   let _selfId = null;
   let _roomId = null;
   let _sse = null;
-  let _peers = new Map();      // peerId -> {displayName, pc, makingOffer, ignoreOffer}
+  let _peers = new Map();
   let _localStream = null;
   let _displayName = 'User';
   let _onPeerJoin = null;
@@ -33,6 +32,8 @@ const FB = (function () {
   let _pollTimer = null;
   let _heartbeatTimer = null;
   let _cleanupTimer = null;
+  let _iceCheckTimer = null;
+  let _pendingOffers = new Map(); // peerId -> {offer, fromPeerId}
 
   function _genId() {
     return 'p_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -56,15 +57,14 @@ const FB = (function () {
   }
 
   async function _fbDelete(path) {
-    try {
-      await fetch(`${DB_URL}${path}.json`, { method: 'DELETE' });
-      return true;
-    } catch { return false; }
+    try { await fetch(`${DB_URL}${path}.json`, { method: 'DELETE' }); return true; }
+    catch { return false; }
   }
 
-  // Create RTCPeerConnection with perfect negotiation
   function _createPC(remotePeerId) {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc._lastIceCheck = Date.now();
+    pc._iceFailCount = 0;
 
     if (_localStream) {
       _localStream.getTracks().forEach(t => pc.addTrack(t, _localStream));
@@ -81,21 +81,45 @@ const FB = (function () {
     };
 
     pc.ontrack = (e) => {
+      console.log('[fb] ontrack fired from', remotePeerId.slice(0, 12), 'streams=' + e.streams.length);
       if (_onPeerStream && e.streams[0]) {
         _onPeerStream(e.streams[0], remotePeerId);
       }
     };
 
+    pc.oniceconnectionstatechange = () => {
+      console.log('[fb] ICE state:', pc.iceConnectionState, 'for', remotePeerId.slice(0, 12));
+      pc._lastIceCheck = Date.now();
+      if (pc.iceConnectionState === 'failed') {
+        pc._iceFailCount++;
+        if (pc._iceFailCount <= 2) {
+          console.log('[fb] ICE failed, restarting...');
+          pc.restartIce();
+        }
+      } else if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        pc._iceFailCount = 0;
+      }
+    };
+
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        if (_onPeerLeave) _onPeerLeave(remotePeerId);
+      console.log('[fb] PC state:', pc.connectionState, 'for', remotePeerId.slice(0, 12));
+      if (pc.connectionState === 'failed') {
+        pc._iceFailCount++;
+        if (pc._iceFailCount <= 2) {
+          console.log('[fb] PC failed, attempting restart...');
+          if (pc.signalingState === 'stable') {
+            _renegotiate(remotePeerId);
+          }
+        }
+      } else if (pc.connectionState === 'disconnected') {
+        // Don't immediately close — wait for timeout
+        console.log('[fb] PC disconnected, waiting...');
       }
     };
 
     return pc;
   }
 
-  // Send a signal to a specific peer
   async function _sendSignal(toPeerId, signal) {
     if (signal.type === 'candidate') {
       const key = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -111,55 +135,100 @@ const FB = (function () {
     }
   }
 
+  // Renegotiate (send new offer)
+  async function _renegotiate(peerId) {
+    let peer = _peers.get(peerId);
+    if (!peer || !peer.pc) return;
+    if (peer.pc.signalingState !== 'stable') return;
+    if (peer.makingOffer) return;
+    peer.makingOffer = true;
+    try {
+      const offer = await peer.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+      await peer.pc.setLocalDescription(offer);
+      await _sendSignal(peerId, { type: 'offer', sdp: JSON.stringify(offer), from: _selfId });
+      console.log('[fb] renegotiate offer sent to', peerId.slice(0, 12));
+    } catch (e) { console.warn('[fb] renegotiate failed', e); }
+    peer.makingOffer = false;
+  }
+
+  // Process incoming offer — ANSWER it (we already have localStream set)
+  async function _processOffer(fromPeerId, signalData) {
+    let peer = _peers.get(fromPeerId);
+    if (!peer) {
+      peer = { pc: null, displayName: 'Гость', makingOffer: false };
+      _peers.set(fromPeerId, peer);
+    }
+
+    const offer = JSON.parse(signalData.sdp);
+
+    // Glare handling
+    if (peer.makingOffer) {
+      if (_selfId < fromPeerId) {
+        console.log('[fb] glare — keeping our offer');
+        await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
+        return;
+      }
+    }
+
+    if (!peer.pc) peer.pc = _createPC(fromPeerId);
+
+    // Ensure our local tracks are on the PC
+    if (_localStream) {
+      const senders = peer.pc.getSenders();
+      _localStream.getTracks().forEach(t => {
+        const existing = senders.find(s => s.track && s.track.kind === t.kind);
+        if (!existing) {
+          peer.pc.addTrack(t, _localStream);
+          console.log('[fb] added local track before answering');
+        }
+      });
+    }
+
+    console.log('[fb] processing offer from', fromPeerId.slice(0, 12));
+    await peer.pc.setRemoteDescription(offer);
+    const answer = await peer.pc.createAnswer();
+    await peer.pc.setLocalDescription(answer);
+    await _sendSignal(fromPeerId, { type: 'answer', sdp: JSON.stringify(answer), from: _selfId });
+    console.log('[fb] answer sent to', fromPeerId.slice(0, 12), 'senders=' + peer.pc.getSenders().length);
+    await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
+  }
+
   // Process incoming signal
   async function _processSignal(fromPeerId, signalType, signalData) {
     if (!signalData) return;
 
-    // For message-type signals (ring, chat, hello, etc.), forward to handler
+    // Message-type signals
     if (signalType === 'ring' || signalType === 'ringAccept' || signalType === 'ringDecline' ||
         signalType === 'chat' || signalType === 'hello') {
       const handler = _handlers[signalType];
       if (handler) handler(signalData.data, fromPeerId);
-      // Delete the signal after processing
       await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/${signalType}`);
       return;
     }
 
-    // For WebRTC signals, we need a peer connection
+    // Store offer as PENDING — don't process until user accepts the call
+    if (signalType === 'offer') {
+      console.log('[fb] offer received from', fromPeerId.slice(0, 12), '— storing as pending');
+      _pendingOffers.set(fromPeerId, { signalData, fromPeerId });
+      await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
+      // Notify the app that we have a pending offer (for the ring dialog)
+      const ringHandler = _handlers['ring'];
+      if (ringHandler) ringHandler({ displayName: signalData.displayName || 'Участник' }, fromPeerId);
+      return;
+    }
+
+    // WebRTC signals that need a PC
     let peer = _peers.get(fromPeerId);
     if (!peer) {
-      peer = { pc: null, displayName: 'Гость', makingOffer: false, ignoreOffer: false };
+      peer = { pc: null, displayName: 'Гость', makingOffer: false };
       _peers.set(fromPeerId, peer);
     }
 
-    if (signalType === 'offer') {
-      const offer = JSON.parse(signalData.sdp);
-      if (peer.makingOffer) {
-        // Glare: both sides made offers. Lower peer ID wins.
-        if (_selfId < fromPeerId) {
-          console.log('[fb] glare — keeping our offer, ignoring theirs');
-          await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
-          return;
-        }
-      }
-      if (!peer.pc) peer.pc = _createPC(fromPeerId);
-      // Ensure our local tracks are on the PC BEFORE creating the answer
-      // so the caller receives our video/audio via ontrack
-      if (_localStream && peer.pc.getSenders().length === 0) {
-        _localStream.getTracks().forEach(t => peer.pc.addTrack(t, _localStream));
-      }
-      console.log('[fb] received offer from', fromPeerId.slice(0, 12));
-      await peer.pc.setRemoteDescription(offer);
-      const answer = await peer.pc.createAnswer();
-      await peer.pc.setLocalDescription(answer);
-      await _sendSignal(fromPeerId, { type: 'answer', sdp: JSON.stringify(answer), from: _selfId });
-      console.log('[fb] answer sent to', fromPeerId.slice(0, 12), 'senders=' + peer.pc.getSenders().length);
-      // Delete the offer signal
-      await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
-    } else if (signalType === 'answer') {
+    if (signalType === 'answer') {
       if (peer.pc) {
-        console.log('[fb] received answer from', fromPeerId.slice(0, 12), 'state=' + peer.pc.signalingState);
-        try { await peer.pc.setRemoteDescription(JSON.parse(signalData.sdp)); } catch(e) { console.warn('[fb] setRemoteDescription failed', e); }
+        console.log('[fb] received answer from', fromPeerId.slice(0, 12));
+        try { await peer.pc.setRemoteDescription(JSON.parse(signalData.sdp)); }
+        catch(e) { console.warn('[fb] setRemoteDescription(answer) failed', e); }
       }
       await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/answer`);
     } else if (signalType === 'hangup') {
@@ -170,7 +239,7 @@ const FB = (function () {
     }
   }
 
-  // Poll for signals addressed to us
+  // Poll for signals
   async function _pollSignals() {
     if (!_selfId || !_roomId) return;
     const signals = await _fbGet(`/rooms/${_roomId}/signals/${_selfId}`);
@@ -182,104 +251,98 @@ const FB = (function () {
         if (sigType === 'candidates') {
           if (sigData) {
             for (const [key, candidate] of Object.entries(sigData)) {
-              const sigKey = fromPeerId + ':candidates:' + key;
+              const sigKey = fromPeerId + ':cand:' + key;
               if (_processedSignals.has(sigKey)) continue;
               _processedSignals.add(sigKey);
-              // Process ICE candidate
               let peer = _peers.get(fromPeerId);
               if (!peer) {
-                peer = { pc: null, displayName: 'Гость', makingOffer: false, ignoreOffer: false };
+                peer = { pc: null, displayName: 'Гость', makingOffer: false };
                 _peers.set(fromPeerId, peer);
               }
               if (!peer.pc) peer.pc = _createPC(fromPeerId);
               try { await peer.pc.addIceCandidate(JSON.parse(candidate.candidate)); } catch {}
-              // Delete this candidate
               await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/candidates/${key}`);
             }
           }
         } else {
-          const sigKey = fromPeerId + ':' + sigType + ':' + Date.now();
           await _processSignal(fromPeerId, sigType, sigData);
         }
       }
     }
-
-    // Clean up processed signals set
     if (_processedSignals.size > 200) _processedSignals.clear();
   }
 
-  // Start SSE listener for peer presence changes
+  // SSE for peer presence
   function _startSSE() {
     if (_sse) { _sse.close(); }
     _sse = new EventSource(`${DB_URL}/rooms/${_roomId}/peers.json`);
     _sse.addEventListener('put', async (e) => {
       const data = JSON.parse(e.data);
-      const path = data.path;
-      const parts = path.split('/').filter(Boolean);
-
+      const parts = data.path.split('/').filter(Boolean);
       if (parts.length === 1 && parts[0] !== _selfId) {
         const peerId = parts[0];
         if (data.data) {
-          // Peer added or updated
           if (!_peers.has(peerId)) {
-            _peers.set(peerId, { pc: null, displayName: data.data.displayName || 'Гость', makingOffer: false, ignoreOffer: false });
+            _peers.set(peerId, { pc: null, displayName: data.data.displayName || 'Гость', makingOffer: false });
             if (_onPeerJoin) _onPeerJoin(peerId);
-            // Send hello
             await _sendSignal(peerId, { type: 'hello', data: { displayName: _displayName }, from: _selfId });
           } else {
-            // Update display name
-            const peer = _peers.get(peerId);
-            peer.displayName = data.data.displayName || peer.displayName;
+            _peers.get(peerId).displayName = data.data.displayName || _peers.get(peerId).displayName;
           }
         } else {
-          // Peer removed
           if (_peers.has(peerId)) {
             const peer = _peers.get(peerId);
             if (peer.pc) { try { peer.pc.close(); } catch {} }
             _peers.delete(peerId);
+            _pendingOffers.delete(peerId);
             if (_onPeerLeave) _onPeerLeave(peerId);
           }
         }
       }
     });
-    _sse.onerror = () => { /* SSE auto-reconnects */ };
+    _sse.onerror = () => {};
   }
 
-  // Heartbeat: update our lastSeen every 5s
   async function _heartbeat() {
     if (!_selfId || !_roomId) return;
     await _fbPut(`/rooms/${_roomId}/peers/${_selfId}/lastSeen`, Date.now());
   }
 
-  // Cleanup: remove stale peers (lastSeen > 15s ago)
   async function _cleanupStalePeers() {
     if (!_roomId) return;
     const peers = await _fbGet(`/rooms/${_roomId}/peers`);
     const now = Date.now();
     const livePeerIds = new Set();
-    
-    // Check Firebase peers
     if (peers) {
       for (const [peerId, info] of Object.entries(peers)) {
         if (peerId === _selfId) { livePeerIds.add(peerId); continue; }
         const lastSeen = info.lastSeen || info.joinedAt || 0;
         if (now - lastSeen > 15000) {
-          // Stale — delete from Firebase
           await _fbDelete(`/rooms/${_roomId}/peers/${peerId}`);
           await _fbDelete(`/rooms/${_roomId}/signals/${peerId}`);
-        } else {
-          livePeerIds.add(peerId);
-        }
+        } else { livePeerIds.add(peerId); }
       }
     }
-    
-    // Clean local _peers: remove any peer not in livePeerIds
     for (const peerId of _peers.keys()) {
       if (!livePeerIds.has(peerId)) {
         const peer = _peers.get(peerId);
         if (peer.pc) { try { peer.pc.close(); } catch {} }
         _peers.delete(peerId);
+        _pendingOffers.delete(peerId);
         if (_onPeerLeave) _onPeerLeave(peerId);
+      }
+    }
+  }
+
+  // ICE keepalive: check every 15s, renegotiate if failing
+  function _checkIceHealth() {
+    for (const [peerId, peer] of _peers) {
+      if (!peer.pc) continue;
+      const state = peer.pc.iceConnectionState;
+      const age = Date.now() - (peer.pc._lastIceCheck || 0);
+      if (state === 'failed' || (state === 'disconnected' && age > 15000)) {
+        console.log('[fb] ICE unhealthy:', state, 'renegotiating', peerId.slice(0, 12));
+        _renegotiate(peerId);
       }
     }
   }
@@ -299,120 +362,116 @@ const FB = (function () {
     },
 
     async joinRoom(roomId, userInfo) {
-      // Leave any existing room first
-      if (_selfId) this.leave();
+      if (_selfId) await this.leave();
       await new Promise(r => setTimeout(r, 300));
-
       _selfId = _genId();
       _roomId = roomId;
       _displayName = userInfo.displayName || 'User';
       _peers.clear();
       _processedSignals.clear();
+      _pendingOffers.clear();
 
-      // Write our peer entry with lastSeen
       await _fbPut(`/rooms/${_roomId}/peers/${_selfId}`, {
-        displayName: _displayName,
-        joinedAt: Date.now(),
-        lastSeen: Date.now()
+        displayName: _displayName, joinedAt: Date.now(), lastSeen: Date.now()
       });
-
-      // Start SSE listener for peer presence
       _startSSE();
-
-      // Poll for signals every 1s
       _pollTimer = setInterval(_pollSignals, 1000);
-
-      // Heartbeat every 5s
       _heartbeatTimer = setInterval(_heartbeat, 5000);
-
-      // Cleanup stale peers every 10s
       _cleanupTimer = setInterval(_cleanupStalePeers, 10000);
+      _iceCheckTimer = setInterval(_checkIceHealth, 15000);
 
-      // Get existing peers and send them hello
       const existing = await _fbGet(`/rooms/${_roomId}/peers`);
       if (existing) {
         const now = Date.now();
         for (const [peerId, info] of Object.entries(existing)) {
           if (peerId === _selfId) continue;
-          // Skip stale peers
           const lastSeen = info.lastSeen || info.joinedAt || 0;
-          if (now - lastSeen > 15000) {
-            await _fbDelete(`/rooms/${_roomId}/peers/${peerId}`);
-            continue;
-          }
+          if (now - lastSeen > 15000) { await _fbDelete(`/rooms/${_roomId}/peers/${peerId}`); continue; }
           if (!_peers.has(peerId)) {
-            _peers.set(peerId, { pc: null, displayName: info.displayName || 'Гость', makingOffer: false, ignoreOffer: false });
+            _peers.set(peerId, { pc: null, displayName: info.displayName || 'Гость', makingOffer: false });
             if (_onPeerJoin) _onPeerJoin(peerId);
             await _sendSignal(peerId, { type: 'hello', data: { displayName: _displayName }, from: _selfId });
           }
         }
       }
-
       return _selfId;
     },
 
-    leave() {
+    async leave() {
       if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
       if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
       if (_cleanupTimer) { clearInterval(_cleanupTimer); _cleanupTimer = null; }
+      if (_iceCheckTimer) { clearInterval(_iceCheckTimer); _iceCheckTimer = null; }
       if (_sse) { _sse.close(); _sse = null; }
-      // Close all peer connections
       for (const [id, peer] of _peers) {
         if (peer.pc) { try { peer.pc.close(); } catch {} }
       }
-      // Delete our presence and signals
-      if (_selfId && _roomId) {
-        _fbDelete(`/rooms/${_roomId}/peers/${_selfId}`).catch(() => {});
-        _fbDelete(`/rooms/${_roomId}/signals/${_selfId}`).catch(() => {});
+      const oldSelfId = _selfId;
+      const oldRoomId = _roomId;
+      if (oldSelfId && oldRoomId) {
+        try {
+          await Promise.all([
+            _fbDelete(`/rooms/${oldRoomId}/peers/${oldSelfId}`),
+            _fbDelete(`/rooms/${oldRoomId}/signals/${oldSelfId}`)
+          ]);
+        } catch {}
       }
       _peers.clear();
       _processedSignals.clear();
+      _pendingOffers.clear();
       _selfId = null;
       _roomId = null;
     },
 
     setLocalStream(stream) {
       _localStream = stream;
-      for (const [id, peer] of _peers) {
-        if (peer.pc) {
-          // Add tracks to existing PCs that don't have them yet
-          const existingSenders = peer.pc.getSenders();
-          stream.getTracks().forEach(t => {
-            const sender = existingSenders.find(s => s.track && s.track.kind === t.kind);
-            if (sender) {
-              sender.replaceTrack(t);
-            } else {
-              peer.pc.addTrack(t, stream);
-              console.log('[fb] added track to existing PC for', id.slice(0, 12));
-            }
-          });
-          // If PC is in stable state and we just added tracks, we need to renegotiate
-          // (send a new offer so the other side knows about our tracks)
-          if (peer.pc.signalingState === 'stable' && !peer.makingOffer) {
-            console.log('[fb] renegotiating to send new tracks to', id.slice(0, 12));
-            this.startCall(id).catch(e => console.warn('[fb] renegotiate failed', e));
+    },
+
+    // Called by app.js when user clicks "Accept" on incoming call
+    // Sets local stream, then processes any pending offer
+    async acceptCall(peerId) {
+      console.log('[fb] acceptCall from', peerId?.slice(0, 12));
+      // Ensure local stream is set
+      if (!_localStream) {
+        console.warn('[fb] acceptCall called but no localStream');
+      }
+      // Process pending offer if exists
+      const pending = _pendingOffers.get(peerId);
+      if (pending) {
+        console.log('[fb] processing pending offer from', peerId.slice(0, 12));
+        _pendingOffers.delete(peerId);
+        await _processOffer(peerId, pending.signalData);
+      } else {
+        console.log('[fb] no pending offer, waiting for it to arrive...');
+        // The offer might not have arrived yet. Wait up to 10s for it.
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          const pending2 = _pendingOffers.get(peerId);
+          if (pending2) {
+            _pendingOffers.delete(peerId);
+            await _processOffer(peerId, pending2.signalData);
+            return;
           }
         }
+        console.warn('[fb] no offer arrived after 10s');
       }
     },
 
     async startCall(peerId) {
       let peer = _peers.get(peerId);
       if (!peer) {
-        peer = { pc: null, displayName: 'Гость', makingOffer: false, ignoreOffer: false };
+        peer = { pc: null, displayName: 'Гость', makingOffer: false };
         _peers.set(peerId, peer);
       }
       if (!peer.pc) peer.pc = _createPC(peerId);
-      if (peer.pc.signalingState !== 'stable') return; // already negotiating
+      if (peer.pc.signalingState !== 'stable') return;
       peer.makingOffer = true;
       try {
         const offer = await peer.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await peer.pc.setLocalDescription(offer);
-        await _sendSignal(peerId, { type: 'offer', sdp: JSON.stringify(offer), from: _selfId });
+        await _sendSignal(peerId, { type: 'offer', sdp: JSON.stringify(offer), from: _selfId, displayName: _displayName });
         console.log('[fb] offer sent to', peerId.slice(0, 12));
-      } catch (e) {
-        console.warn('[fb] offer failed', e);
-      }
+      } catch (e) { console.warn('[fb] offer failed', e); }
       peer.makingOffer = false;
     },
 
@@ -428,11 +487,8 @@ const FB = (function () {
 
     makeAction(name) {
       const send = (data, toPeerId) => {
-        if (toPeerId) {
-          _sendSignal(toPeerId, { type: name, data, from: _selfId });
-        } else {
-          _broadcastSignal({ type: name, data, from: _selfId });
-        }
+        if (toPeerId) _sendSignal(toPeerId, { type: name, data, from: _selfId });
+        else _broadcastSignal({ type: name, data, from: _selfId });
       };
       const onReceive = (handler) => { _handlers[name] = handler; };
       return [send, onReceive];
