@@ -786,6 +786,16 @@ async function joinPeerRoom(room) {
     $('#pcState').textContent = `PC: connected (${state.remoteStreams.size})`;
     $('#iceState').textContent = `ICE: connected`;
     updateConnectionIndicator();
+    // Auto-enter fullscreen when remote video first appears
+    if (state.remoteStreams.size === 1 && !document.fullscreenElement) {
+      const stage = $('#callStage');
+      if (stage) {
+        if (stage.requestFullscreen) stage.requestFullscreen().catch(() => {});
+        else if (stage.webkitRequestFullscreen) stage.webkitRequestFullscreen();
+        else stage.classList.add('ui-hidden'); // fallback
+      }
+      toast('Видео подключено ✓ Нажмите «Экран» для выхода из полного экрана', 'ok');
+    }
   };
 
   // Set up actions
@@ -1064,10 +1074,14 @@ async function startCall() {
 
 function hangup(notify = true) {
   if (notify) trysteroBroadcast({ kind: 'hangup' });
+  // Exit fullscreen if active
+  if (document.fullscreenElement) { document.exitFullscreen?.().catch(() => {}); }
+  else if (document.webkitFullscreenElement) { document.webkitExitFullscreen?.(); }
   for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
   _stopStreams.clear();
   state.remoteStreams.clear();
   $('#remoteVideo').srcObject = null;
+  $('#callStage')?.classList.remove('ui-hidden');
   setStatus($('#peerStatus'), 'WebRTC: нет соединения', 'warn');
   $('#pcState').textContent = 'PC: нет данных';
   $('#iceState').textContent = 'ICE: нет данных';
@@ -1925,44 +1939,47 @@ function bind() {
   bindClick('#closeRoomsBtn', closeDrawers);
   bindClick('#joinRoomByCodeBtn', joinRoomByCodeManual);
   bindClick('#showUiBtn', () => $('#callStage')?.classList.remove('ui-hidden'));
-  // Click on remote video = toggle fullscreen (hide all UI, show video only)
-  // Double-click = exit fullscreen
-  let _fullscreenClicks = 0;
-  let _fullscreenTimer = null;
-  $('#remoteVideo')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    _fullscreenClicks++;
-    if (_fullscreenClicks === 1) {
-      _fullscreenTimer = setTimeout(() => {
-        // Single click = toggle fullscreen
-        const stage = $('#callStage');
-        const isHidden = stage?.classList.contains('ui-hidden');
-        if (isHidden) {
-          stage?.classList.remove('ui-hidden');
-        } else {
-          stage?.classList.add('ui-hidden');
+  // Fullscreen toggle button — uses browser Fullscreen API to hide mobile chrome
+  bindClick('#fullscreenBtn', async () => {
+    const stage = $('#callStage');
+    if (!stage) return;
+    try {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        // Exit fullscreen
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+        toast('Полный экран выключен', 'info');
+      } else {
+        // Enter fullscreen on the call stage (hides browser address bar, bottom bar)
+        if (stage.requestFullscreen) await stage.requestFullscreen();
+        else if (stage.webkitRequestFullscreen) stage.webkitRequestFullscreen();
+        else {
+          // Fallback: just hide UI (no browser fullscreen)
+          stage.classList.add('ui-hidden');
         }
-        _fullscreenClicks = 0;
-      }, 250);
-    } else if (_fullscreenClicks === 2) {
-      clearTimeout(_fullscreenTimer);
-      // Double click = exit fullscreen + request browser fullscreen
-      $('#callStage')?.classList.remove('ui-hidden');
-      const video = $('#remoteVideo');
-      if (video) {
-        if (document.fullscreenElement) {
-          document.exitFullscreen?.();
-        } else {
-          video.requestFullscreen?.() || video.webkitRequestFullscreen?.();
-        }
+        toast('Полный экран включён', 'ok');
       }
-      _fullscreenClicks = 0;
+    } catch (e) {
+      // Fallback: toggle UI hide
+      stage?.classList.toggle('ui-hidden');
     }
   });
-  // Also keep the stage click for non-video areas
+  // Click on remote video = toggle UI hide (keep controls accessible)
+  $('#remoteVideo')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('#callStage')?.classList.toggle('ui-hidden');
+  });
+  // Click on other stage areas = toggle UI
   $('#callStage')?.addEventListener('click', (e) => {
     if (e.target.closest('button') || e.target.closest('.bottom-drawer') || e.target.closest('.menu-drawer') || e.target.closest('video')) return;
     $('#callStage')?.classList.toggle('ui-hidden');
+  });
+  // Exit fullscreen on hangup
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) {
+      // Exited fullscreen — make sure UI is visible
+      $('#callStage')?.classList.remove('ui-hidden');
+    }
   });
   bindClick('#loginBtn', login);
   bindClick('#logoutBtn', logout);
