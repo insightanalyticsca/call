@@ -197,43 +197,110 @@ const GH = (function () {
   }
 
   // ---- File operations ----
+  // Files > 50 MB are split into chunks and stored as files/<id>_chunk_0, _chunk_1, etc.
+  // On download, chunks are fetched and reassembled.
+  const CHUNK_SIZE = 50 * 1024 * 1024; // 50 MB per chunk (safely under 100 MB GitHub limit)
 
   async function putFile(id, blob, message) {
-    const b64 = await blobToB64(blob);
-    const path = `files/${id}`;
-    // Try to fetch existing SHA (file may not exist yet)
-    let sha = null;
-    try {
-      const existing = await getContents(path);
-      if (existing) sha = existing.sha;
-    } catch {}
-    return await putContents(path, b64, message || `upload ${id}`, sha);
+    const size = blob.size;
+    
+    // Small files: single upload (existing behavior)
+    if (size <= CHUNK_SIZE) {
+      const b64 = await blobToB64(blob);
+      const path = `files/${id}`;
+      let sha = null;
+      try { const existing = await getContents(path); if (existing) sha = existing.sha; } catch {}
+      return await putContents(path, b64, message || `upload ${id}`, sha);
+    }
+
+    // Large files: chunk into pieces
+    const numChunks = Math.ceil(size / CHUNK_SIZE);
+    console.log(`[gh-store] chunking ${size} bytes into ${numChunks} chunks of ${CHUNK_SIZE}`);
+    
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, size);
+      const chunkBlob = blob.slice(start, end);
+      const b64 = await blobToB64(chunkBlob);
+      const chunkPath = `files/${id}_chunk_${i}`;
+      let sha = null;
+      try { const existing = await getContents(chunkPath); if (existing) sha = existing.sha; } catch {}
+      await putContents(chunkPath, b64, `upload chunk ${i+1}/${numChunks} of ${id}`, sha);
+      console.log(`[gh-store] chunk ${i+1}/${numChunks} uploaded`);
+    }
+    
+    // Write a manifest so we know how many chunks to fetch
+    await putContents(`files/${id}_manifest`, 
+      await blobToB64(new Blob([JSON.stringify({ id, chunks: numChunks, size, originalMime: blob.type })], { type: 'application/json' })),
+      `manifest for ${id}`, null);
+    
+    return true;
   }
 
   async function getFile(id) {
-    // Use Contents API first. For files > 1 MB, the Contents API returns
-    // empty content — fall back to the Git Blobs API which has no size limit.
+    // Check for manifest (chunked file)
+    const manifestResp = await getContents(`files/${id}_manifest`);
+    if (manifestResp && manifestResp.content) {
+      // Chunked file — fetch all chunks and reassemble
+      const manifestB64 = manifestResp.content.replace(/\s+/g, '');
+      const manifest = JSON.parse(atob(manifestB64));
+      console.log(`[gh-store] reassembling ${manifest.chunks} chunks for ${id}`);
+      
+      const chunks = [];
+      for (let i = 0; i < manifest.chunks; i++) {
+        const chunkPath = `files/${id}_chunk_${i}`;
+        const r = await getContents(chunkPath);
+        if (!r) { console.warn(`[gh-store] chunk ${i} missing`); return null; }
+        
+        let b64 = r.content;
+        if ((!b64 || b64.length === 0) && r.sha) {
+          const blobResp = await fetch(`${API_BASE}/git/blobs/${r.sha}`, {
+            headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json' }
+          });
+          if (!blobResp.ok) throw new Error(`Git Blobs API -> ${blobResp.status}`);
+          b64 = (await blobResp.json()).content;
+        }
+        if (!b64) return null;
+        b64 = b64.replace(/\s+/g, '');
+        
+        // Convert base64 to Uint8Array (chunked to avoid stack overflow)
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        const copyChunk = 8192;
+        for (let j = 0; j < bin.length; j += copyChunk) {
+          const end = Math.min(j + copyChunk, bin.length);
+          for (let k = j; k < end; k++) bytes[k] = bin.charCodeAt(k);
+        }
+        chunks.push(bytes);
+        console.log(`[gh-store] chunk ${i+1}/${manifest.chunks} fetched (${bytes.length} bytes)`);
+      }
+      
+      // Reassemble into single Blob
+      const totalSize = chunks.reduce((s, c) => s + c.length, 0);
+      const combined = new Uint8Array(totalSize);
+      let offset = 0;
+      for (const chunk of chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return new Blob([combined], { type: manifest.originalMime || 'application/octet-stream' });
+    }
+
+    // Single-file path (existing behavior)
     const path = `files/${id}`;
     const r = await getContents(path);
     if (!r) return null;
 
     let b64 = r.content;
-    // If content is empty (file > 1 MB), use Git Blobs API with the SHA
     if ((!b64 || b64.length === 0) && r.sha) {
       const blobResp = await fetch(`${API_BASE}/git/blobs/${r.sha}`, {
         headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json' }
       });
       if (!blobResp.ok) throw new Error(`Git Blobs API -> ${blobResp.status}`);
-      const blobData = await blobResp.json();
-      b64 = blobData.content;
+      b64 = (await blobResp.json()).content;
     }
     if (!b64) return null;
-    // GitHub's Git Blobs API returns base64 with newlines every 76 chars (RFC 2045).
-    // Browser atob() cannot handle newlines — it silently truncates at the first
-    // newline, giving you only the first ~2 seconds of a video. Strip ALL whitespace
-    // before decoding.
     b64 = b64.replace(/\s+/g, '');
-    // Convert base64 to Blob (chunked to avoid call stack overflow on large files)
     const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
     const chunkSize = 8192;
@@ -340,7 +407,7 @@ const GH = (function () {
         private: j.private,
         remaining: rl?.remaining,
         limit: rl?.limit,
-        maxUploadMb: 100 // GitHub per-file hard limit
+        maxUploadMb: 350 // GitHub per-file hard limit
       };
     } catch (e) {
       return { ok: false, message: e.message };

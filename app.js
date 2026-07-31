@@ -498,7 +498,7 @@ async function checkHealth() {
     setStatus($('#apiStatus'), `API: ok · ${h.repo} · remaining ${h.remaining}/${h.limit} · upload ${h.maxUploadMb}MB`, 'ok');
     $('#uploadLimit').textContent = `до ${h.maxUploadMb} MB`;
   } catch (e) {
-    state.health = { ok: false, storageWritable: false, ffmpegAvailable: false, maxUploadMb: 100 };
+    state.health = { ok: false, storageWritable: false, ffmpegAvailable: false, maxUploadMb: 350 };
     setStatus($('#apiStatus'), `API: ошибка · ${e.message}`, 'bad');
     $('#uploadLimit').textContent = `до 100 MB`;
   }
@@ -1407,7 +1407,7 @@ async function uploadFiles() {
   if (!files.length) return toast('Выберите файл.', 'warn');
   const note = $('#fileNote').value.trim();
   for (const file of files) {
-    if (file.size > 100 * 1024 * 1024) { toast(`${file.name}: больше 100 MB. GitHub не позволит.`, 'bad'); continue; }
+    if (file.size > 350 * 1024 * 1024) { toast(`${file.name}: больше 350 MB. Максимум — 350 MB.`, 'bad'); continue; }
     try {
       await saveMediaBlob(file, 'file', note, file.name);
       toast(`Загружено: ${file.name}`, 'ok');
@@ -1923,7 +1923,7 @@ function setupDragAndDrop() {
     tab('files');
     const note = '';
     for (const file of files) {
-      if (file.size > 100 * 1024 * 1024) { toast(`${file.name}: больше 100 MB.`, 'bad'); continue; }
+      if (file.size > 350 * 1024 * 1024) { toast(`${file.name}: больше 350 MB.`, 'bad'); continue; }
       try {
         await saveMediaBlob(file, 'file', note, file.name);
         toast(`Загружено: ${file.name}`, 'ok');
