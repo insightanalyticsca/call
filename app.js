@@ -863,6 +863,7 @@ async function joinPeerRoom(room) {
     if (state.remoteStreams.has(peerId)) return;
     if (state._callingPeer === peerId) return;
     showIncomingCall(callerName, peerId);
+    _notifyIncomingCall(callerName);
   });
 
   onRingAccept((_data, peerId) => {
@@ -2058,6 +2059,10 @@ function bind() {
   });
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.installPrompt = e; $('#installBtn')?.classList.remove('hidden'); });
   bindClick('#installBtn', async () => { if (state.installPrompt) await state.installPrompt.prompt(); });
+  bindClick('#notifSettingsBtn', () => {
+    _requestNotifPermission();
+    _showNotificationSettings();
+  });
   $('#loginUser')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#loginPass')?.focus(); });
   $('#loginPass')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
 
@@ -2117,3 +2122,157 @@ async function init() {
 }
 
 init().catch((e) => toast(e.message, 'bad'));
+
+/* ============================================================
+ * Notifications — browser push + sound + tab flash + Teams webhook
+ * ============================================================ */
+let _notifSound = null;
+let _originalTitle = document.title;
+let _titleFlashTimer = null;
+let _lastMessageCount = 0;
+let _lastMediaCount = 0;
+let _teamsWebhookUrl = '';
+
+// Load Teams webhook URL from localStorage
+try { _teamsWebhookUrl = localStorage.getItem('teams-webhook-url') || ''; } catch {}
+
+function _playSound(freq = 800, duration = 300, pattern = 'ring') {
+  try {
+    if (!_notifSound) {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      _notifSound = ctx;
+    }
+    const ctx = _notifSound;
+    if (ctx.state === 'suspended') ctx.resume();
+    
+    if (pattern === 'ring') {
+      // Phone ring pattern: two tones
+      for (let i = 0; i < 3; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.frequency.value = freq;
+        osc.type = 'sine';
+        gain.gain.setValueAtTime(0.3, ctx.currentTime + i * 0.4);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * 0.4 + 0.3);
+        osc.start(ctx.currentTime + i * 0.4);
+        osc.stop(ctx.currentTime + i * 0.4 + 0.3);
+      }
+    } else if (pattern === 'chime') {
+      // Notification chime: ascending notes
+      const notes = [523, 659, 784];
+      notes.forEach((f, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.frequency.value = f;
+        osc.type = 'sine';
+        gain.gain.setValueAtTime(0.2, ctx.currentTime + i * 0.15);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * 0.15 + 0.2);
+        osc.start(ctx.currentTime + i * 0.15);
+        osc.stop(ctx.currentTime + i * 0.15 + 0.2);
+      });
+    }
+  } catch (e) { /* audio not available */ }
+}
+
+function _flashTabTitle(text) {
+  if (_titleFlashTimer) clearInterval(_titleFlashTimer);
+  let toggle = false;
+  _titleFlashTimer = setInterval(() => {
+    document.title = toggle ? text : _originalTitle;
+    toggle = !toggle;
+  }, 800);
+  // Stop flashing after 30s or when tab gets focus
+  setTimeout(() => { _stopTabFlash(); }, 30000);
+  window.addEventListener('focus', _stopTabFlash, { once: true });
+}
+function _stopTabFlash() {
+  if (_titleFlashTimer) { clearInterval(_titleFlashTimer); _titleFlashTimer = null; }
+  document.title = _originalTitle;
+}
+
+async function _showNotification(title, body, icon) {
+  // Browser notification
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      const notif = new Notification(title, {
+        body, icon: icon || 'icon.svg',
+        badge: 'icon.svg', tag: title,
+        requireInteraction: true, silent: false
+      });
+      notif.onclick = () => { window.focus(); notif.close(); };
+    } catch {}
+  }
+  // Teams webhook
+  if (_teamsWebhookUrl) {
+    try {
+      await fetch(_teamsWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: `**${title}**\n${body}` })
+      });
+    } catch {}
+  }
+}
+
+function _requestNotifPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+}
+
+// Check for new messages/files on db.json poll
+function _checkForNewItems(newDb) {
+  if (!state.user || !newDb) return;
+  
+  // Check new messages
+  const msgCount = (newDb.messages || []).length;
+  if (_lastMessageCount > 0 && msgCount > _lastMessageCount) {
+    const newMsgs = (newDb.messages || []).slice(_lastMessageCount);
+    for (const m of newMsgs) {
+      if (m.authorId !== state.user.id) {
+        const name = m.authorName || 'Участник';
+        _showNotification('💬 Новое сообщение', `${name}: ${m.text?.slice(0, 50) || '...'}`);
+        _playSound(659, 200, 'chime');
+        _flashTabTitle('💬 Новое сообщение!');
+      }
+    }
+  }
+  _lastMessageCount = msgCount;
+  
+  // Check new media (files + mail)
+  const mediaCount = (newDb.media || []).filter(m => !m.deletedAt).length;
+  if (_lastMediaCount > 0 && mediaCount > _lastMediaCount) {
+    const allMedia = (newDb.media || []).filter(m => !m.deletedAt);
+    const newItems = allMedia.slice(0, mediaCount - _lastMediaCount);
+    for (const m of newItems) {
+      if (m.uploadedBy !== state.user.id) {
+        const name = m.uploadedByName || 'Участник';
+        const type = m.type === 'mail' ? 'видео/аудио почту' : 'файл';
+        _showNotification('📎 Новый файл', `${name} загрузил ${type}: ${m.originalName}`);
+        _playSound(659, 200, 'chime');
+        _flashTabTitle('📎 Новый файл!');
+      }
+    }
+  }
+  _lastMediaCount = mediaCount;
+}
+
+// Notify incoming call (called from onRing handler)
+function _notifyIncomingCall(callerName) {
+  _showNotification('📞 Входящий звонок', `${callerName} звонит вам`);
+  _playSound(800, 300, 'ring');
+  _flashTabTitle('📞 Входящий звонок!');
+}
+
+// Settings UI for Teams webhook
+function _showNotificationSettings() {
+  const current = _teamsWebhookUrl;
+  const url = prompt('Teams Webhook URL (оставьте пустым чтобы отключить):', current);
+  if (url !== null) {
+    _teamsWebhookUrl = url.trim();
+    try { localStorage.setItem('teams-webhook-url', _teamsWebhookUrl); } catch {}
+    toast(_teamsWebhookUrl ? 'Teams уведомления включены' : 'Teams уведомления выключены', 'ok');
+  }
+}
