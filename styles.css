@@ -424,12 +424,17 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
   inset: 0;
   display: grid;
   place-items: center;
+  cursor: pointer;
 }
 .remote-stage video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain; /* show full face, no crop */
   background: #000;
+  transition: object-fit 0.3s;
+}
+.remote-stage.fullscreen video {
+  object-fit: contain;
 }
 .remote-empty {
   text-align: center;

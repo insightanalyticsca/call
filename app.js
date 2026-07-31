@@ -983,7 +983,7 @@ async function ensureLocalMedia(video = true) {
     state.localStream = null;
   }
   const constraints = video
-    ? { video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 } }, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }
+    ? { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: 1.777 }, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }
     : { video: false, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
   try {
     state.localStream = await getUserMediaCompat(constraints);
@@ -1284,7 +1284,7 @@ async function startRecording() {
     if (!window.MediaRecorder) throw new Error('Этот браузер не поддерживает MediaRecorder.');
     toast(`Запрос доступа к ${mode === 'video' ? 'камере и микрофону' : 'микрофону'}…`, 'info');
     const stream = await getUserMediaCompat(mode === 'video'
-      ? { video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 } }, audio: true }
+      ? { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: 1.777 }, audio: true }
       : { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
     state.recordChunks = [];
     const mime = mode === 'video' ? pickMime(['video/webm;codecs=vp9,opus', 'video/webm', 'video/mp4']) : pickMime(['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']);
@@ -1925,8 +1925,43 @@ function bind() {
   bindClick('#closeRoomsBtn', closeDrawers);
   bindClick('#joinRoomByCodeBtn', joinRoomByCodeManual);
   bindClick('#showUiBtn', () => $('#callStage')?.classList.remove('ui-hidden'));
+  // Click on remote video = toggle fullscreen (hide all UI, show video only)
+  // Double-click = exit fullscreen
+  let _fullscreenClicks = 0;
+  let _fullscreenTimer = null;
+  $('#remoteVideo')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    _fullscreenClicks++;
+    if (_fullscreenClicks === 1) {
+      _fullscreenTimer = setTimeout(() => {
+        // Single click = toggle fullscreen
+        const stage = $('#callStage');
+        const isHidden = stage?.classList.contains('ui-hidden');
+        if (isHidden) {
+          stage?.classList.remove('ui-hidden');
+        } else {
+          stage?.classList.add('ui-hidden');
+        }
+        _fullscreenClicks = 0;
+      }, 250);
+    } else if (_fullscreenClicks === 2) {
+      clearTimeout(_fullscreenTimer);
+      // Double click = exit fullscreen + request browser fullscreen
+      $('#callStage')?.classList.remove('ui-hidden');
+      const video = $('#remoteVideo');
+      if (video) {
+        if (document.fullscreenElement) {
+          document.exitFullscreen?.();
+        } else {
+          video.requestFullscreen?.() || video.webkitRequestFullscreen?.();
+        }
+      }
+      _fullscreenClicks = 0;
+    }
+  });
+  // Also keep the stage click for non-video areas
   $('#callStage')?.addEventListener('click', (e) => {
-    if (e.target.closest('button') || e.target.closest('.bottom-drawer') || e.target.closest('.menu-drawer')) return;
+    if (e.target.closest('button') || e.target.closest('.bottom-drawer') || e.target.closest('.menu-drawer') || e.target.closest('video')) return;
     $('#callStage')?.classList.toggle('ui-hidden');
   });
   bindClick('#loginBtn', login);
