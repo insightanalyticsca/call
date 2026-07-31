@@ -143,12 +143,17 @@ const FB = (function () {
         }
       }
       if (!peer.pc) peer.pc = _createPC(fromPeerId);
+      // Ensure our local tracks are on the PC BEFORE creating the answer
+      // so the caller receives our video/audio via ontrack
+      if (_localStream && peer.pc.getSenders().length === 0) {
+        _localStream.getTracks().forEach(t => peer.pc.addTrack(t, _localStream));
+      }
       console.log('[fb] received offer from', fromPeerId.slice(0, 12));
       await peer.pc.setRemoteDescription(offer);
       const answer = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(answer);
       await _sendSignal(fromPeerId, { type: 'answer', sdp: JSON.stringify(answer), from: _selfId });
-      console.log('[fb] answer sent to', fromPeerId.slice(0, 12));
+      console.log('[fb] answer sent to', fromPeerId.slice(0, 12), 'senders=' + peer.pc.getSenders().length);
       // Delete the offer signal
       await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
     } else if (signalType === 'answer') {

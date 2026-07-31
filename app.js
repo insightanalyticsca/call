@@ -886,10 +886,14 @@ function showIncomingCall(callerName, peerId) {
     toast('Подключение к звонку…', 'info');
     try {
       await ensureLocalMedia(true).catch(async () => ensureLocalMedia(false));
+      // Set our local stream so it's ready when the offer arrives
       if (state.localStream) {
         FB.setLocalStream(state.localStream);
-        await FB.startCall(peerId);
       }
+      // Don't send a new offer — the caller already sent one.
+      // Just wait for the offer to arrive via polling and answer it.
+      // The _processSignal handler will create the answer automatically.
+      toast('Ожидание видео…', 'info');
       updateCallGuide();
     } catch (e) { toast('Не удалось подключиться: ' + e.message, 'bad'); }
   };
