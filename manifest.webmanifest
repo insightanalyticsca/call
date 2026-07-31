@@ -1,14 +1,15 @@
 {
   "name": "Семейная связь",
   "short_name": "Семья",
-  "description": "Приватный семейный звонок, чат, видео/аудио почта и файлы. Статичная версия для GitHub Pages.",
+  "description": "Приватный семейный звонок, чат, видео/аудио почта и файлы.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#08111f",
-  "theme_color": "#06111f",
+  "background_color": "#060812",
+  "theme_color": "#6366f1",
   "icons": [
-    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
   ]
 }
