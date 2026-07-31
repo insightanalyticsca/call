@@ -787,14 +787,17 @@ async function joinPeerRoom(room) {
     $('#iceState').textContent = `ICE: connected`;
     updateConnectionIndicator();
     // Auto-enter fullscreen when remote video first appears
-    if (state.remoteStreams.size === 1 && !document.fullscreenElement) {
+    if (state.remoteStreams.size === 1) {
       const stage = $('#callStage');
+      const video = $('#remoteVideo');
       if (stage) {
-        if (stage.requestFullscreen) stage.requestFullscreen().catch(() => {});
-        else if (stage.webkitRequestFullscreen) stage.webkitRequestFullscreen();
-        else stage.classList.add('ui-hidden'); // fallback
+        let entered = false;
+        if (stage.requestFullscreen) { try { await stage.requestFullscreen(); entered = true; } catch {} }
+        if (!entered && stage.webkitRequestFullscreen) { try { stage.webkitRequestFullscreen(); entered = true; } catch {} }
+        if (!entered && video?.webkitEnterFullscreen) { try { video.webkitEnterFullscreen(); entered = true; } catch {} }
+        if (!entered) { stage.classList.add('ui-hidden'); window.scrollTo(0, 0); }
       }
-      toast('Видео подключено ✓ Нажмите «Экран» для выхода из полного экрана', 'ok');
+      toast('Видео подключено ✓', 'ok');
     }
   };
 
@@ -1939,45 +1942,66 @@ function bind() {
   bindClick('#closeRoomsBtn', closeDrawers);
   bindClick('#joinRoomByCodeBtn', joinRoomByCodeManual);
   bindClick('#showUiBtn', () => $('#callStage')?.classList.remove('ui-hidden'));
-  // Fullscreen toggle button — uses browser Fullscreen API to hide mobile chrome
+  // Fullscreen toggle — handles iOS Safari (no Fullscreen API on divs)
   bindClick('#fullscreenBtn', async () => {
     const stage = $('#callStage');
+    const video = $('#remoteVideo');
     if (!stage) return;
-    try {
-      if (document.fullscreenElement || document.webkitFullscreenElement) {
-        // Exit fullscreen
-        if (document.exitFullscreen) await document.exitFullscreen();
-        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-        toast('Полный экран выключен', 'info');
-      } else {
-        // Enter fullscreen on the call stage (hides browser address bar, bottom bar)
-        if (stage.requestFullscreen) await stage.requestFullscreen();
-        else if (stage.webkitRequestFullscreen) stage.webkitRequestFullscreen();
-        else {
-          // Fallback: just hide UI (no browser fullscreen)
-          stage.classList.add('ui-hidden');
-        }
-        toast('Полный экран включён', 'ok');
+
+    // Check if we're in any fullscreen mode
+    const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || stage.classList.contains('ui-hidden');
+
+    if (isFullscreen) {
+      // Exit fullscreen
+      if (document.fullscreenElement) { await document.exitFullscreen?.().catch(() => {}); }
+      else if (document.webkitFullscreenElement) { document.webkitExitFullscreen?.(); }
+      stage.classList.remove('ui-hidden');
+      toast('Полный экран выключен', 'info');
+    } else {
+      // Enter fullscreen — try multiple methods
+      let entered = false;
+      // Method 1: Standard Fullscreen API (Android Chrome, desktop)
+      if (stage.requestFullscreen) {
+        try { await stage.requestFullscreen(); entered = true; } catch {}
       }
-    } catch (e) {
-      // Fallback: toggle UI hide
-      stage?.classList.toggle('ui-hidden');
+      // Method 2: WebKit Fullscreen API (older Safari)
+      if (!entered && stage.webkitRequestFullscreen) {
+        try { stage.webkitRequestFullscreen(); entered = true; } catch {}
+      }
+      // Method 3: iOS Safari video fullscreen (native player)
+      if (!entered && video && video.webkitEnterFullscreen) {
+        try { video.webkitEnterFullscreen(); entered = true; } catch {}
+      }
+      // Method 4: Fallback — hide UI with CSS (works everywhere including iOS Safari)
+      if (!entered) {
+        stage.classList.add('ui-hidden');
+        // Scroll to top to hide Safari address bar
+        window.scrollTo(0, 0);
+        entered = true;
+      }
+      if (entered) toast('Полный экран включён. Нажмите «Экран» для выхода.', 'ok');
     }
   });
-  // Click on remote video = toggle UI hide (keep controls accessible)
+  // Click on remote video = toggle UI (for iOS where fullscreen API doesn't work)
   $('#remoteVideo')?.addEventListener('click', (e) => {
     e.stopPropagation();
     $('#callStage')?.classList.toggle('ui-hidden');
+    window.scrollTo(0, 0); // hide Safari address bar
   });
-  // Click on other stage areas = toggle UI
+  // Click on stage areas (not buttons/video) = toggle UI
   $('#callStage')?.addEventListener('click', (e) => {
     if (e.target.closest('button') || e.target.closest('.bottom-drawer') || e.target.closest('.menu-drawer') || e.target.closest('video')) return;
     $('#callStage')?.classList.toggle('ui-hidden');
+    window.scrollTo(0, 0);
   });
   // Exit fullscreen on hangup
   document.addEventListener('fullscreenchange', () => {
     if (!document.fullscreenElement) {
-      // Exited fullscreen — make sure UI is visible
+      $('#callStage')?.classList.remove('ui-hidden');
+    }
+  });
+  document.addEventListener('webkitfullscreenchange', () => {
+    if (!document.webkitFullscreenElement) {
       $('#callStage')?.classList.remove('ui-hidden');
     }
   });

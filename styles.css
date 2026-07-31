@@ -412,12 +412,29 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
 }
 
 /* ---------- Call Screen ---------- */
-.call-page { position: absolute; inset: 0 0 0 0; padding: 0; overflow: hidden; }
+.call-page { position: fixed; inset: 0; padding: 0; overflow: hidden; z-index: 10; }
 .call-stage {
   position: absolute;
   inset: 0;
   background: #000;
   overflow: hidden;
+}
+/* iOS Safari: when UI is hidden, use 100dvh to fill screen
+   (dynamic viewport height adjusts when Safari address bar hides) */
+.call-stage.ui-hidden {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  height: 100dvh;
+  z-index: 9999;
+}
+.call-stage.ui-hidden .remote-stage {
+  position: absolute;
+  inset: 0;
+}
+.call-stage.ui-hidden .show-ui {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  z-index: 10000;
 }
 .remote-stage {
   position: absolute;
@@ -770,19 +787,25 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
 .call-stage.ui-hidden .call-controls,
 .call-stage.ui-hidden .local-tile { opacity: 0; pointer-events: none; transition: opacity 0.4s; }
 .show-ui {
-  position: absolute;
-  bottom: 20px;
+  position: fixed;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
   left: 50%;
   transform: translateX(-50%);
-  padding: 8px 16px;
+  padding: 10px 20px;
   border-radius: 999px;
-  background: var(--glass);
+  background: rgba(0, 0, 0, 0.6);
   border: 1px solid var(--glass-border);
   backdrop-filter: blur(12px);
-  z-index: 5;
-  font-size: 13px;
+  z-index: 10000;
+  font-size: 14px;
   color: white;
   cursor: pointer;
+  display: none;
+}
+.call-stage.ui-hidden .show-ui {
+  display: block !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
 }
 
 /* ---------- Bottom Drawer (Rooms) ---------- */
