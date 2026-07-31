@@ -204,12 +204,14 @@ const GH = (function () {
   // ---- File operations ----
   // Files > 50 MB are split into chunks and stored as files/<id>_chunk_0, _chunk_1, etc.
   // On download, chunks are fetched and reassembled.
-  const CHUNK_SIZE = 50 * 1024 * 1024; // 50 MB per chunk (safely under 100 MB GitHub limit)
+  // Use small chunks (5MB) to avoid browser memory issues with large fetch bodies
+  // 5MB file = 6.7MB base64 = safe for fetch() JSON body
+  const CHUNK_SIZE = 5 * 1024 * 1024;
 
   async function putFile(id, blob, message) {
     const size = blob.size;
     
-    // Small files: single upload (existing behavior)
+    // Small files (<= 5MB): single upload via Contents API
     if (size <= CHUNK_SIZE) {
       const b64 = await blobToB64(blob);
       const path = `files/${id}`;
@@ -218,27 +220,94 @@ const GH = (function () {
       return await putContents(path, b64, message || `upload ${id}`, sha);
     }
 
-    // Large files: chunk into pieces
+    // Large files: chunk into 5MB pieces, upload each via Git Blobs API
+    // then create a tree + commit to add all chunks at once
     const numChunks = Math.ceil(size / CHUNK_SIZE);
     console.log(`[gh-store] chunking ${size} bytes into ${numChunks} chunks of ${CHUNK_SIZE}`);
     
+    // Step 1: Upload each chunk as a Git Blob (no size limit, efficient)
+    const blobShas = [];
     for (let i = 0; i < numChunks; i++) {
       const start = i * CHUNK_SIZE;
       const end = Math.min(start + CHUNK_SIZE, size);
       const chunkBlob = blob.slice(start, end);
       const b64 = await blobToB64(chunkBlob);
-      const chunkPath = `files/${id}_chunk_${i}`;
-      let sha = null;
-      try { const existing = await getContents(chunkPath); if (existing) sha = existing.sha; } catch {}
-      await putContents(chunkPath, b64, `upload chunk ${i+1}/${numChunks} of ${id}`, sha);
-      console.log(`[gh-store] chunk ${i+1}/${numChunks} uploaded`);
+      
+      // Use Git Blobs API — handles large content better than Contents API
+      const blobResp = await fetch(`${API_BASE}/git/blobs`, {
+        method: 'POST',
+        headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: b64, encoding: 'base64' })
+      });
+      if (!blobResp.ok) throw new Error(`Git Blobs API -> ${blobResp.status}`);
+      const blobData = await blobResp.json();
+      blobShas.push(blobData.sha);
+      console.log(`[gh-store] chunk ${i+1}/${numChunks} uploaded as blob ${blobData.sha.slice(0, 8)}`);
     }
     
-    // Write a manifest so we know how many chunks to fetch
-    await putContents(`files/${id}_manifest`, 
-      await blobToB64(new Blob([JSON.stringify({ id, chunks: numChunks, size, originalMime: blob.type })], { type: 'application/json' })),
-      `manifest for ${id}`, null);
+    // Step 2: Get current commit SHA + tree SHA
+    const refResp = await fetch(`${API_BASE}/git/refs/heads/${CONFIG.branch}`, {
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json' }
+    });
+    const refData = await refResp.json();
+    const commitSha = refData.object.sha;
     
+    const commitResp = await fetch(`${API_BASE}/git/commits/${commitSha}`, {
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json' }
+    });
+    const commitData = await commitResp.json();
+    const baseTreeSha = commitData.tree.sha;
+    
+    // Step 3: Create a new tree with all chunk files + manifest
+    const treeItems = [];
+    for (let i = 0; i < numChunks; i++) {
+      treeItems.push({
+        path: `files/${id}_chunk_${i}`,
+        mode: '100644',
+        type: 'blob',
+        sha: blobShas[i]
+      });
+    }
+    // Add manifest
+    const manifestB64 = await blobToB64(new Blob([JSON.stringify({ id, chunks: numChunks, size, originalMime: blob.type })], { type: 'application/json' }));
+    const manifestBlobResp = await fetch(`${API_BASE}/git/blobs`, {
+      method: 'POST',
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: manifestB64, encoding: 'base64' })
+    });
+    const manifestBlobData = await manifestBlobResp.json();
+    treeItems.push({
+      path: `files/${id}_manifest`,
+      mode: '100644',
+      type: 'blob',
+      sha: manifestBlobData.sha
+    });
+    
+    const treeResp = await fetch(`${API_BASE}/git/trees`, {
+      method: 'POST',
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_tree: baseTreeSha, tree: treeItems })
+    });
+    if (!treeResp.ok) throw new Error(`Git Trees API -> ${treeResp.status}`);
+    const treeData = await treeResp.json();
+    
+    // Step 4: Create commit with the new tree
+    const newCommitResp = await fetch(`${API_BASE}/git/commits`, {
+      method: 'POST',
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: `upload ${id} (${numChunks} chunks, ${size} bytes)`, tree: treeData.sha, parents: [commitSha] })
+    });
+    if (!newCommitResp.ok) throw new Error(`Git Commits API -> ${newCommitResp.status}`);
+    const newCommitData = await newCommitResp.json();
+    
+    // Step 5: Update the ref to point to the new commit
+    await fetch(`${API_BASE}/git/refs/heads/${CONFIG.branch}`, {
+      method: 'PATCH',
+      headers: { 'Authorization': `token ${CONFIG.token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha: newCommitData.sha, force: false })
+    });
+    
+    console.log(`[gh-store] all ${numChunks} chunks committed`);
     return true;
   }
 
