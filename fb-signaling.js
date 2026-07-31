@@ -375,17 +375,23 @@ const FB = (function () {
       _localStream = stream;
       for (const [id, peer] of _peers) {
         if (peer.pc) {
-          // Remove old tracks, add new
-          peer.pc.getSenders().forEach(s => {
-            if (s.track) {
-              // Already has tracks, replace them
+          // Add tracks to existing PCs that don't have them yet
+          const existingSenders = peer.pc.getSenders();
+          stream.getTracks().forEach(t => {
+            const sender = existingSenders.find(s => s.track && s.track.kind === t.kind);
+            if (sender) {
+              sender.replaceTrack(t);
+            } else {
+              peer.pc.addTrack(t, stream);
+              console.log('[fb] added track to existing PC for', id.slice(0, 12));
             }
           });
-          stream.getTracks().forEach(t => {
-            const sender = peer.pc.getSenders().find(s => s.track && s.track.kind === t.kind);
-            if (sender) sender.replaceTrack(t);
-            else peer.pc.addTrack(t, stream);
-          });
+          // If PC is in stable state and we just added tracks, we need to renegotiate
+          // (send a new offer so the other side knows about our tracks)
+          if (peer.pc.signalingState === 'stable' && !peer.makingOffer) {
+            console.log('[fb] renegotiating to send new tracks to', id.slice(0, 12));
+            this.startCall(id).catch(e => console.warn('[fb] renegotiate failed', e));
+          }
         }
       }
     },
