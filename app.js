@@ -1413,7 +1413,7 @@ async function uploadFiles() {
   if (!files.length) return toast('Выберите файл.', 'warn');
   const note = $('#fileNote').value.trim();
   for (const file of files) {
-    if (file.size > 35 * 1024 * 1024) { toast(`${file.name}: больше 350 MB. Максимум — 350 MB.`, 'bad'); continue; }
+    if (file.size > 350 * 1024 * 1024) { toast(`${file.name}: больше 350 MB. Максимум — 350 MB.`, 'bad'); continue; }
     try {
       await saveMediaBlob(file, 'file', note, file.name);
       toast(`Загружено: ${file.name}`, 'ok');
@@ -1929,7 +1929,7 @@ function setupDragAndDrop() {
     tab('files');
     const note = '';
     for (const file of files) {
-      if (file.size > 35 * 1024 * 1024) { toast(`${file.name}: больше 350 MB.`, 'bad'); continue; }
+      if (file.size > 350 * 1024 * 1024) { toast(`${file.name}: больше 350 MB.`, 'bad'); continue; }
       try {
         await saveMediaBlob(file, 'file', note, file.name);
         toast(`Загружено: ${file.name}`, 'ok');
