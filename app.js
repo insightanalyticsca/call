@@ -779,7 +779,7 @@ async function joinPeerRoom(room) {
     updateConnectionIndicator();
   };
 
-  FB.onPeerStream = (stream, peerId) => {
+  FB.onPeerStream = async (stream, peerId) => {
     state.remoteStreams.set(peerId, stream);
     updateRemoteVideo();
     setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
