@@ -119,8 +119,13 @@ const GH = (function () {
     return bufToB64(buf);
   }
   function b64ToBlob(b64, mime) {
-    const bytes = new Uint8Array(atob(b64).length);
-    for (let i = 0; i < bytes.length; i++) bytes[i] = atob(b64).charCodeAt(i);
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    const chunkSize = 32768;
+    for (let i = 0; i < bin.length; i += chunkSize) {
+      const end = Math.min(i + chunkSize, bin.length);
+      for (let j = i; j < end; j++) bytes[j] = bin.charCodeAt(j);
+    }
     return new Blob([bytes], { type: mime || 'application/octet-stream' });
   }
 

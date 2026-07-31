@@ -1394,7 +1394,13 @@ async function saveMediaBlob(blob, type, note, originalName, mode) {
     lastDownloadedAt: null
   };
   // 1. Upload blob to files/<id>
-  toast(`Загрузка ${originalName}…`, 'info');
+  const sizeMB = (blob.size / 1048576).toFixed(1);
+  if (blob.size > 50 * 1024 * 1024) {
+    const numChunks = Math.ceil(blob.size / (50 * 1024 * 1024));
+    toast(`Загрузка ${originalName} (${sizeMB} MB, ${numChunks} частей)…`, 'info');
+  } else {
+    toast(`Загрузка ${originalName} (${sizeMB} MB)…`, 'info');
+  }
   await GH.putFile(id, blob, `upload ${originalName} (${type})`);
   // 2. Add metadata to db.json
   await ensureDb();
