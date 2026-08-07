@@ -2276,3 +2276,108 @@ function _showNotificationSettings() {
     toast(_teamsWebhookUrl ? 'Teams уведомления включены' : 'Teams уведомления выключены', 'ok');
   }
 }
+
+/* ============================================================
+ * Pull-to-refresh — pull down on any content page to refresh
+ * ============================================================ */
+(function() {
+  let _pullStartY = 0;
+  let _pullCurrentY = 0;
+  let _pulling = false;
+  let _pullDistance = 0;
+  const PULL_THRESHOLD = 70; // px needed to trigger refresh
+  const PULL_MAX = 120; // max visual pull distance
+
+  const indicator = () => document.getElementById('ptrIndicator');
+  const arrow = () => document.getElementById('ptrArrow');
+
+  // Only enable on content pages (not calls)
+  function _isEnabled() {
+    const active = document.querySelector('.tab-panel.active');
+    if (!active) return false;
+    // Calls page is position:fixed, no scroll — skip it
+    if (active.id === 'calls') return false;
+    // Only trigger when scrolled to top
+    return active.scrollTop <= 0;
+  }
+
+  document.addEventListener('touchstart', (e) => {
+    if (!_isEnabled()) return;
+    _pullStartY = e.touches[0].clientY;
+    _pulling = false;
+    _pullDistance = 0;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!_isEnabled() && !_pulling) return;
+    _pullCurrentY = e.touches[0].clientY;
+    const diff = _pullCurrentY - _pullStartY;
+
+    if (diff > 5 && _isEnabled()) {
+      _pulling = true;
+      _pullDistance = Math.min(diff, PULL_MAX);
+
+      const ind = indicator();
+      if (ind) {
+        ind.classList.add('visible');
+        ind.style.transform = `translateX(-50%) translateY(${_pullDistance - 50}px)`;
+
+        // Flip arrow when threshold reached
+        const ar = arrow();
+        if (ar) {
+          if (_pullDistance >= PULL_THRESHOLD) {
+            ar.classList.add('flip');
+            ar.style.display = 'block';
+          } else {
+            ar.classList.remove('flip');
+            ar.style.display = 'block';
+          }
+        }
+      }
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchend', async () => {
+    if (!_pulling) return;
+    _pulling = false;
+
+    const ind = indicator();
+    const ar = arrow();
+
+    if (_pullDistance >= PULL_THRESHOLD) {
+      // Trigger refresh
+      if (ind) {
+        ind.style.transform = 'translateX(-50%) translateY(10px)';
+        // Show spinner
+        if (ar) ar.outerHTML = '<div class="ptr-spinner" id="ptrArrow"></div>';
+      }
+      // Refresh appropriate content based on active tab
+      const activeTab = document.querySelector('.tab-panel.active')?.id;
+      try {
+        if (activeTab === 'chat') await refreshMessages();
+        else if (activeTab === 'mail') await refreshMail();
+        else if (activeTab === 'files') await refreshFiles();
+        else if (activeTab === 'stats') await refreshStats();
+        else await refreshAll();
+        toast('Обновлено ✓', 'ok');
+      } catch (e) {
+        toast('Ошибка обновления', 'bad');
+      }
+    }
+
+    // Reset indicator
+    setTimeout(() => {
+      if (ind) {
+        ind.classList.remove('visible');
+        ind.style.transform = 'translateX(-50%) translateY(-60px)';
+      }
+      // Restore arrow for next time
+      const currentArrow = document.getElementById('ptrArrow');
+      if (currentArrow && currentArrow.classList.contains('ptr-spinner')) {
+        currentArrow.outerHTML = '<div class="ptr-arrow" id="ptrArrow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg></div>';
+      }
+    }, 500);
+
+    _pullDistance = 0;
+  }, { passive: true });
+})();
