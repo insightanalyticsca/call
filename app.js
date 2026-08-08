@@ -2193,18 +2193,34 @@ function _stopTabFlash() {
 }
 
 async function _showNotification(title, body, icon) {
-  // Browser notification
+  const iconUrl = icon || 'icon.svg';
+  
+  // Method 1: Service Worker notification (works on iOS PWA 16.4+, Android, desktop)
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    try {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'SHOW_NOTIFICATION',
+        title, body, icon: iconUrl, tag: title
+      });
+    } catch {}
+  }
+  
+  // Method 2: Window Notification API (works on desktop, Android Chrome)
+  // iOS Safari blocks this in PWA mode — SW method above handles iOS
   if ('Notification' in window && Notification.permission === 'granted') {
     try {
       const notif = new Notification(title, {
-        body, icon: icon || 'icon.svg',
-        badge: 'icon.svg', tag: title,
-        requireInteraction: true, silent: false
+        body, icon: iconUrl, badge: 'icon.svg', tag: title,
+        requireInteraction: false, silent: true // silent=true because we play our own sound
       });
       notif.onclick = () => { window.focus(); notif.close(); };
     } catch {}
   }
-  // Teams webhook
+  
+  // Method 3: In-app banner (works when app is in foreground — visible to user)
+  _showInAppBanner(title, body);
+  
+  // Method 4: Teams webhook (optional)
   if (_teamsWebhookUrl) {
     try {
       await fetch(_teamsWebhookUrl, {
@@ -2216,9 +2232,63 @@ async function _showNotification(title, body, icon) {
   }
 }
 
-function _requestNotifPermission() {
-  if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission();
+// In-app banner notification — slides in from top, auto-dismisses
+function _showInAppBanner(title, body) {
+  let banner = document.getElementById('inAppBanner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'inAppBanner';
+    banner.style.cssText = `
+      position: fixed; top: calc(8px + env(safe-area-inset-top, 0px)); left: 50%;
+      transform: translateX(-50%) translateY(-120px);
+      background: rgba(17, 24, 39, 0.97); backdrop-filter: blur(24px);
+      border: 1px solid rgba(99, 102, 241, 0.4); border-radius: 16px;
+      padding: 12px 18px; z-index: 500; max-width: 90vw;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.4), 0 0 24px rgba(99,102,241,0.2);
+      transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+      display: flex; gap: 12px; align-items: center; cursor: pointer;
+    `;
+    document.body.appendChild(banner);
+    banner.onclick = () => { banner.style.transform = 'translateX(-50%) translateY(-120px)'; };
+  }
+  banner.innerHTML = `
+    <div style="font-size: 14px; font-weight: 700; color: #c7d2fe;">${escapeHtml(title)}</div>
+    <div style="font-size: 12px; color: #94a3b8; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(body)}</div>
+  `;
+  // Slide in
+  requestAnimationFrame(() => {
+    banner.style.transform = 'translateX(-50%) translateY(0)';
+  });
+  // Auto dismiss after 5s
+  clearTimeout(banner._timer);
+  banner._timer = setTimeout(() => {
+    banner.style.transform = 'translateX(-50%) translateY(-120px)';
+  }, 5000);
+}
+
+async function _requestNotifPermission() {
+  // On iOS PWA, Notification.requestPermission must be called from a user gesture
+  // and the app must be installed (standalone mode)
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  
+  if ('Notification' in window) {
+    if (Notification.permission === 'default') {
+      try {
+        const result = await Notification.requestPermission();
+        if (result === 'granted') {
+          toast('Уведомления включены ✓', 'ok');
+          // Test notification
+          setTimeout(() => _showNotification('✓ Тест', 'Уведомления работают'), 500);
+        } else if (result === 'denied' && isStandalone) {
+          toast('Уведомления заблокированы. Настройки → Safari → Уведомления', 'warn');
+        }
+      } catch (e) {
+        // iOS might not support requestPermission directly
+        toast('Разрешите уведомления в настройках браузера', 'info');
+      }
+    } else if (Notification.permission === 'granted') {
+      toast('Уведомления уже включены', 'ok');
+    }
   }
 }
 
