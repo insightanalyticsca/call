@@ -228,6 +228,41 @@ function highlightActiveButton(stepId) {
     if (el) el.classList.add('guide-highlight');
   }
 }
+
+// Debug overlay — shows real-time WebRTC state on screen
+function _updateDebug() {
+  const el = document.getElementById('debugOverlay');
+  if (!el) return;
+  const peers = FB.getPeers ? FB.getPeers() : {};
+  const peerIds = Object.keys(peers);
+  let pcInfo = 'no PC';
+  for (const [id, p] of (FB._peersInternal || new Map())) {
+    // Can't access internal _peers, use what we have
+  }
+  const remoteVid = document.getElementById('remoteVideo');
+  const lines = [
+    '=== WEBRTC DEBUG ===',
+    'selfId: ' + (state.peerId || 'null').slice(0, 12),
+    'room: ' + (state.currentRoom?.code || 'none'),
+    'peers: ' + peerIds.length + ' (' + peerIds.map(p => p.slice(0, 8)).join(',') + ')',
+    'localStream: ' + (state.localStream ? state.localStream.getTracks().length + ' tracks' : 'null'),
+    '  video: ' + (state.localStream?.getVideoTracks().length || 0) + ' audio: ' + (state.localStream?.getAudioTracks().length || 0),
+    'remoteStreams: ' + state.remoteStreams.size,
+    'remoteVideo.srcObject: ' + (remoteVid?.srcObject ? 'SET' : 'null'),
+    'remoteVideo.readyState: ' + remoteVid?.readyState,
+    'remoteVideo.videoWidth: ' + remoteVid?.videoWidth,
+    'remoteVideo.videoHeight: ' + remoteVid?.videoHeight,
+    'has-remote class: ' + document.querySelector('.remote-stage')?.classList.contains('has-remote'),
+    'stopStreams: ' + _stopStreams.size,
+    'callingPeer: ' + (state._callingPeer || 'null').slice(0, 12),
+    'pendingOffers: (check console)',
+    'socket: ' + document.getElementById('socketStatus')?.textContent,
+    'peer: ' + document.getElementById('peerStatus')?.textContent,
+  ];
+  el.textContent = lines.join('\n');
+}
+setInterval(_updateDebug, 1000);
+
 function isLocalOrigin() { return ['localhost', '127.0.0.1', '::1'].includes(location.hostname); }
 function randomId(prefix = '') { return `${prefix}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
 function randomCode() {
@@ -780,8 +815,12 @@ async function joinPeerRoom(room) {
   };
 
   FB.onPeerStream = async (stream, peerId) => {
+    console.log('[APP] onPeerStream fired! peerId=' + peerId.slice(0,12) + ' tracks=' + stream.getTracks().length + ' video=' + stream.getVideoTracks().length + ' audio=' + stream.getAudioTracks().length);
     state.remoteStreams.set(peerId, stream);
+    console.log('[APP] remoteStreams size now=' + state.remoteStreams.size);
     updateRemoteVideo();
+    console.log('[APP] remoteVideo srcObject=' + (document.getElementById('remoteVideo')?.srcObject ? 'SET' : 'null'));
+    console.log('[APP] has-remote=' + document.querySelector('.remote-stage')?.classList.contains('has-remote'));
     setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
     $('#pcState').textContent = `PC: connected (${state.remoteStreams.size})`;
     $('#iceState').textContent = `ICE: connected`;
