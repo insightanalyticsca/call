@@ -29,6 +29,13 @@ const LK = (function () {
   let _handlers = {};
   let _dataHandlerBound = false;
 
+  // Pending-events buffer: if trackSubscribed fires before app.js sets
+  // the _onPeerStream callback, we buffer the event here. When the
+  // callback is later set (via the onPeerStream setter), we flush.
+  let _pendingStreams = [];   // [{stream, peerSid}]
+  let _pendingJoins = [];     // [peerSid]
+  let _pendingLeaves = [];    // [peerSid]
+
   // Generate a LiveKit access token
   // Uses the jose library to create a JWT
   async function _createToken(roomName, participantName) {
@@ -110,13 +117,22 @@ const LK = (function () {
       _room.on('participantConnected', (p) => {
         console.log('[lk] participant joined:', p.identity);
         _peers.set(p.sid, p.identity || p.name || 'Гость');
-        if (_onPeerJoin) _onPeerJoin(p.sid);
+        if (_onPeerJoin) {
+          _onPeerJoin(p.sid);
+        } else {
+          console.log('[lk] buffering participantConnected (no callback yet)');
+          _pendingJoins.push(p.sid);
+        }
       });
 
       _room.on('participantDisconnected', (p) => {
         console.log('[lk] participant left:', p.identity);
         _peers.delete(p.sid);
-        if (_onPeerLeave) _onPeerLeave(p.sid);
+        if (_onPeerLeave) {
+          _onPeerLeave(p.sid);
+        } else {
+          _pendingLeaves.push(p.sid);
+        }
       });
 
       _room.on('trackSubscribed', (track, pub, p) => {
@@ -125,7 +141,15 @@ const LK = (function () {
           const mediaTrack = track?.mediaStreamTrack || track;
           if (mediaTrack) {
             const stream = new MediaStream([mediaTrack]);
-            if (_onPeerStream) _onPeerStream(stream, p.sid);
+            if (_onPeerStream) {
+              _onPeerStream(stream, p.sid);
+            } else {
+              // Buffer — app.js hasn't set the callback yet (it does so
+              // after joinRoom returns, but trackSubscribed may fire
+              // during the await connect()).
+              console.log('[lk] buffering trackSubscribed (no callback yet)');
+              _pendingStreams.push({ stream, peerSid: p.sid });
+            }
           }
         } catch (e) { console.warn('[lk] track sub error:', e.message); }
       });
@@ -173,8 +197,8 @@ const LK = (function () {
       // uses the SAME source as the local preview. No double capture.
 
       // Backup manual scan for existing participants — catches any edge cases
-      // where the SDK already had tracks subscribed before we registered handlers
-      // (shouldn't happen now, but kept as a safety net).
+      // where the SDK already had tracks subscribed before we registered handlers.
+      // Also buffers if callbacks aren't set yet.
       try {
         const remoteParts = _room.remoteParticipants;
         if (remoteParts) {
@@ -183,12 +207,14 @@ const LK = (function () {
               console.log('[lk] existing participant (scan):', p.identity);
               _peers.set(sid, p.identity || p.name || 'Гость');
               if (_onPeerJoin) _onPeerJoin(sid);
+              else _pendingJoins.push(sid);
             }
             for (const pub of p.trackPublications.values()) {
               try {
                 if (pub.track && pub.track.mediaStreamTrack) {
                   const stream = new MediaStream([pub.track.mediaStreamTrack]);
                   if (_onPeerStream) _onPeerStream(stream, sid);
+                  else _pendingStreams.push({ stream, peerSid: sid });
                 }
               } catch (e) {
                 console.warn('[lk] scan track error:', e.message);
@@ -279,6 +305,9 @@ const LK = (function () {
       }
       _peers.clear();
       _dataHandlerBound = false;
+      _pendingStreams = [];
+      _pendingJoins = [];
+      _pendingLeaves = [];
     },
 
     setLocalStream(stream) {
@@ -326,9 +355,34 @@ const LK = (function () {
       return [send, onReceive];
     },
 
-    set onPeerJoin(fn) { _onPeerJoin = fn; },
-    set onPeerLeave(fn) { _onPeerLeave = fn; },
-    set onPeerStream(fn) { _onPeerStream = fn; },
+    set onPeerJoin(fn) {
+      _onPeerJoin = fn;
+      // Flush buffered joins
+      if (_pendingJoins.length > 0) {
+        console.log('[lk] flushing', _pendingJoins.length, 'buffered participantConnected events');
+        const to = _pendingJoins;
+        _pendingJoins = [];
+        for (const sid of to) { try { fn(sid); } catch (e) { console.warn('[lk] flush join:', e.message); } }
+      }
+    },
+    set onPeerLeave(fn) {
+      _onPeerLeave = fn;
+      if (_pendingLeaves.length > 0) {
+        const to = _pendingLeaves;
+        _pendingLeaves = [];
+        for (const sid of to) { try { fn(sid); } catch (e) { console.warn('[lk] flush leave:', e.message); } }
+      }
+    },
+    set onPeerStream(fn) {
+      _onPeerStream = fn;
+      // Flush buffered streams
+      if (_pendingStreams.length > 0) {
+        console.log('[lk] flushing', _pendingStreams.length, 'buffered trackSubscribed events');
+        const to = _pendingStreams;
+        _pendingStreams = [];
+        for (const { stream, peerSid } of to) { try { fn(stream, peerSid); } catch (e) { console.warn('[lk] flush stream:', e.message); } }
+      }
+    },
 
     // Backwards-compat no-op — data handler is now bound inside joinRoom.
     _setupDataHandler() {

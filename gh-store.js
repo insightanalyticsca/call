@@ -312,7 +312,11 @@ const GH = (function () {
   }
 
   async function getFile(id) {
-    // Check for manifest (chunked file)
+    // Check for manifest (chunked file).
+    // NOTE: if the file was never chunked (small files stored inline) or
+    // was deleted, this will 404. The browser logs the 404 in console —
+    // that's unavoidable with fetch(). We catch it and try the inline
+    // path below. These 404s are harmless noise.
     let manifestResp = null;
     try { manifestResp = await getContents(`files/${id}_manifest`); } catch {}
     if (manifestResp && manifestResp.content) {

@@ -760,56 +760,16 @@ async function joinPeerRoom(room) {
 
   setStatus($('#socketStatus'), 'Подключение к LiveKit…', 'warn');
 
-  // Join LiveKit room — handles signaling, media relay, everything.
-  // LiveKit no longer captures the camera itself (see livekit.js publishLocalStream).
-  await LK.joinRoom(room.code, {
-    displayName: state.user.displayName || state.user.username,
-    username: state.user.username
-  });
+  // ============================================================
+  // CRITICAL (lk10): set up ALL callbacks BEFORE joinRoom.
+  // LiveKit fires trackSubscribed for existing participants'
+  // tracks DURING await connect(). If the callbacks aren't set
+  // yet, those events are lost and we get asymmetric video.
+  // livekit.js also buffers events as a safety net, but setting
+  // callbacks first is the correct fix.
+  // ============================================================
 
-  // Set up event handlers
-  LK.onPeerJoin = (peerId) => {
-    const peers = LK.getPeers();
-    const name = peers[peerId]?.displayName || 'Гость';
-    _peerNames.set(peerId, name);
-    renderPresence();
-    updateConnectionIndicator();
-  };
-
-  LK.onPeerLeave = (peerId) => {
-    _peerNames.delete(peerId);
-    state.remoteStreams.delete(peerId);
-    renderPresence();
-    updateRemoteVideo();
-    updateConnectionIndicator();
-  };
-
-  LK.onPeerStream = (stream, peerId) => {
-    // LiveKit sends tracks one at a time — merge into existing stream
-    let existing = state.remoteStreams.get(peerId);
-    if (existing) {
-      // Add new tracks to existing stream
-      stream.getTracks().forEach(t => {
-        // Remove old track of same kind
-        existing.getTracks().forEach(old => {
-          if (old.kind === t.kind) existing.removeTrack(old);
-        });
-        existing.addTrack(t);
-      });
-    } else {
-      state.remoteStreams.set(peerId, stream);
-    }
-    updateRemoteVideo();
-    setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
-    $('#pcState').textContent = 'PC: connected (' + state.remoteStreams.size + ')';
-    $('#iceState').textContent = 'ICE: connected (LiveKit)';
-    updateConnectionIndicator();
-    if (state.remoteStreams.size === 1) {
-      toast('Видео подключено ✓ Нажмите «Экран» для полного экрана', 'ok');
-    }
-  };
-
-  // Set up messaging
+  // --- Set up messaging actions FIRST (so dataReceived dispatcher has handlers) ---
   const [sendChat, onChat] = LK.makeAction('chat');
   const [sendHello, onHello] = LK.makeAction('hello');
   const [sendHangup, onHangup] = LK.makeAction('hangup');
@@ -824,27 +784,8 @@ async function joinPeerRoom(room) {
   state._sendRingAccept = sendRingAccept;
   state._sendRingDecline = sendRingDecline;
   state._room = LK;
-  state.peer = { connected: true };
-  state.peerId = LK.selfId;
 
-  LK._setupDataHandler();
-
-  setStatus($('#socketStatus'), 'LiveKit: подключён ✓', 'ok');
-  updateConnectionIndicator();
-
-  // Capture camera + mic ONCE and publish to LiveKit.
-  // This is the SINGLE source of truth for local media — no double getUserMedia.
-  // We try video+audio first, fall back to audio-only if camera fails.
-  try {
-    await ensureLocalMedia(true);
-  } catch (e) {
-    console.warn('[joinPeerRoom] ensureLocalMedia(video) failed:', e.message);
-    try { await ensureLocalMedia(false); } catch (e2) { console.warn('[joinPeerRoom] audio-only failed too:', e2.message); }
-  }
-  // ensureLocalMedia already calls publishLocalStream if state._room exists.
-
-  sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
-
+  // --- Register message handlers BEFORE joinRoom ---
   onHello((data, peerId) => {
     _peerNames.set(peerId, data.displayName || data.username || 'Гость');
     renderPresence();
@@ -886,6 +827,73 @@ async function joinPeerRoom(room) {
     toast('Звонок отклонён.', 'warn');
     state._callingPeer = null;
   });
+
+  // --- Set peer event callbacks BEFORE joinRoom ---
+  // livekit.js will buffer any events that fire during connect()
+  // and flush them when these setters are called. But setting
+  // them before joinRoom is still the correct order.
+  LK.onPeerJoin = (peerId) => {
+    const peers = LK.getPeers();
+    const name = peers[peerId]?.displayName || 'Гость';
+    _peerNames.set(peerId, name);
+    renderPresence();
+    updateConnectionIndicator();
+  };
+
+  LK.onPeerLeave = (peerId) => {
+    _peerNames.delete(peerId);
+    state.remoteStreams.delete(peerId);
+    renderPresence();
+    updateRemoteVideo();
+    updateConnectionIndicator();
+  };
+
+  LK.onPeerStream = (stream, peerId) => {
+    // LiveKit sends tracks one at a time — merge into existing stream
+    let existing = state.remoteStreams.get(peerId);
+    if (existing) {
+      // Add new tracks to existing stream
+      stream.getTracks().forEach(t => {
+        // Remove old track of same kind
+        existing.getTracks().forEach(old => {
+          if (old.kind === t.kind) existing.removeTrack(old);
+        });
+        existing.addTrack(t);
+      });
+    } else {
+      state.remoteStreams.set(peerId, stream);
+    }
+    updateRemoteVideo();
+    setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
+    $('#pcState').textContent = 'PC: connected (' + state.remoteStreams.size + ')';
+    $('#iceState').textContent = 'ICE: connected (LiveKit)';
+    updateConnectionIndicator();
+    if (state.remoteStreams.size === 1) {
+      toast('Видео подключено ✓ Нажмите «Экран» для полного экрана', 'ok');
+    }
+  };
+
+  // --- NOW join the room ---
+  await LK.joinRoom(room.code, {
+    displayName: state.user.displayName || state.user.username,
+    username: state.user.username
+  });
+
+  state.peer = { connected: true };
+  state.peerId = LK.selfId;
+
+  setStatus($('#socketStatus'), 'LiveKit: подключён ✓', 'ok');
+  updateConnectionIndicator();
+
+  // Capture camera + mic ONCE and publish to LiveKit.
+  try {
+    await ensureLocalMedia(true);
+  } catch (e) {
+    console.warn('[joinPeerRoom] ensureLocalMedia(video) failed:', e.message);
+    try { await ensureLocalMedia(false); } catch (e2) { console.warn('[joinPeerRoom] audio-only failed too:', e2.message); }
+  }
+
+  sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
 }
 
 
