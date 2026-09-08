@@ -974,11 +974,29 @@ async function disconnectPeer() {
 
 function updateRemoteVideo() {
   const streams = Array.from(state.remoteStreams.values());
-  if (streams.length === 0) { $('#remoteVideo').srcObject = null; return; }
-  if (streams.length === 1) { $('#remoteVideo').srcObject = streams[0]; return; }
-  const mixed = new MediaStream();
-  for (const s of streams) s.getTracks().forEach((t) => mixed.addTrack(t));
-  $('#remoteVideo').srcObject = mixed;
+  const stage = document.querySelector('.remote-stage');
+  console.log('[APP] updateRemoteVideo: streams=' + streams.length);
+  if (streams.length === 0) {
+    $('#remoteVideo').srcObject = null;
+    stage?.classList.remove('has-remote');
+    return;
+  }
+  // ADD THE CLASS — this hides the placeholder
+  stage?.classList.add('has-remote');
+  console.log('[APP] added has-remote class');
+  
+  if (streams.length === 1) {
+    console.log('[APP] setting srcObject, tracks=' + streams[0].getTracks().length);
+    $('#remoteVideo').srcObject = streams[0];
+    // Force play
+    const v = $('#remoteVideo');
+    v.play()?.then(() => console.log('[APP] remote video playing')).catch(e => console.warn('[APP] play failed', e));
+  } else {
+    const mixed = new MediaStream();
+    for (const s of streams) s.getTracks().forEach((t) => mixed.addTrack(t));
+    $('#remoteVideo').srcObject = mixed;
+    $('#remoteVideo')?.play()?.catch(() => {});
+  }
 }
 
 
