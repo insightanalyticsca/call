@@ -65,10 +65,8 @@ const FB = (function () {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc._lastIceCheck = Date.now();
     pc._iceFailCount = 0;
-
-    if (_localStream) {
-      _localStream.getTracks().forEach(t => pc.addTrack(t, _localStream));
-    }
+    // NOTE: tracks are added by the caller (startCall or _processOffer)
+    // NOT here, to avoid double-add errors
 
     pc.onicecandidate = async (e) => {
       if (e.candidate) {
