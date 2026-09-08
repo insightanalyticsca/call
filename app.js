@@ -739,66 +739,61 @@ async function ensureTrystero() {
 }
 
 async function joinPeerRoom(room) {
+  // Leave any existing room
   if (state._room) {
-    await FB.leave();
+    try { await LK.leave(); } catch {}
     _peerNames.clear();
-    for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
     _stopStreams.clear();
     state.remoteStreams.clear();
-    await new Promise((r) => setTimeout(r, 500));
   }
 
   state.currentRoom = room;
   state.currentRoomCode = room.code;
 
-  await FB.joinRoom(room.code, {
+  setStatus($('#socketStatus'), 'Подключение к LiveKit…', 'warn');
+
+  // Join LiveKit room — handles signaling, media relay, everything
+  await LK.joinRoom(room.code, {
     displayName: state.user.displayName || state.user.username,
     username: state.user.username
   });
 
-  state.peer = { connected: true };
-  state.peerId = FB.selfId;
-
   // Set up event handlers
-  FB.onPeerJoin = (peerId) => {
-    const peers = FB.getPeers();
-    const info = peers[peerId];
-    _peerNames.set(peerId, info?.displayName || 'Гость');
+  LK.onPeerJoin = (peerId) => {
+    const peers = LK.getPeers();
+    const name = peers[peerId]?.displayName || 'Гость';
+    _peerNames.set(peerId, name);
     renderPresence();
     updateConnectionIndicator();
-    // Send hello
-    if (state._sendHello) state._sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username }, peerId);
   };
 
-  FB.onPeerLeave = (peerId) => {
+  LK.onPeerLeave = (peerId) => {
     _peerNames.delete(peerId);
     state.remoteStreams.delete(peerId);
-    _stopStreams.delete(peerId);
     renderPresence();
     updateRemoteVideo();
     updateConnectionIndicator();
   };
 
-  FB.onPeerStream = async (stream, peerId) => {
+  LK.onPeerStream = (stream, peerId) => {
     state.remoteStreams.set(peerId, stream);
     updateRemoteVideo();
     setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
-    $('#pcState').textContent = `PC: connected (${state.remoteStreams.size})`;
-    $('#iceState').textContent = `ICE: connected`;
+    $('#pcState').textContent = 'PC: connected (' + state.remoteStreams.size + ')';
+    $('#iceState').textContent = 'ICE: connected (LiveKit)';
     updateConnectionIndicator();
-    // Don't auto-fullscreen — requires user gesture. Just show toast.
     if (state.remoteStreams.size === 1) {
       toast('Видео подключено ✓ Нажмите «Экран» для полного экрана', 'ok');
     }
   };
 
-  // Set up actions
-  const [sendChat, onChat] = FB.makeAction('chat');
-  const [sendHello, onHello] = FB.makeAction('hello');
-  const [sendHangup, onHangup] = FB.makeAction('hangup');
-  const [sendRing, onRing] = FB.makeAction('ring');
-  const [sendRingAccept, onRingAccept] = FB.makeAction('ringAccept');
-  const [sendRingDecline, onRingDecline] = FB.makeAction('ringDecline');
+  // Set up messaging
+  const [sendChat, onChat] = LK.makeAction('chat');
+  const [sendHello, onHello] = LK.makeAction('hello');
+  const [sendHangup, onHangup] = LK.makeAction('hangup');
+  const [sendRing, onRing] = LK.makeAction('ring');
+  const [sendRingAccept, onRingAccept] = LK.makeAction('ringAccept');
+  const [sendRingDecline, onRingDecline] = LK.makeAction('ringDecline');
 
   state._sendChat = sendChat;
   state._sendHello = sendHello;
@@ -806,16 +801,17 @@ async function joinPeerRoom(room) {
   state._sendRing = sendRing;
   state._sendRingAccept = sendRingAccept;
   state._sendRingDecline = sendRingDecline;
-  state._room = FB;
+  state._room = LK;
+  state.peer = { connected: true };
+  state.peerId = LK.selfId;
 
-  setStatus($('#socketStatus'), 'Сигналинг: подключён (Firebase) ✓', 'ok');
+  LK._setupDataHandler();
+
+  setStatus($('#socketStatus'), 'LiveKit: подключён ✓', 'ok');
   updateConnectionIndicator();
 
-  // Announce presence once
   sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
-  // No periodic re-announce — SSE handles presence changes in real-time
 
-  // Handlers
   onHello((data, peerId) => {
     _peerNames.set(peerId, data.displayName || data.username || 'Гость');
     renderPresence();
@@ -835,7 +831,6 @@ async function joinPeerRoom(room) {
 
   onHangup((_data, peerId) => {
     state.remoteStreams.delete(peerId);
-    _stopStreams.delete(peerId);
     updateRemoteVideo();
     updateConnectionIndicator();
     toast('Собеседник завершил звонок.');
@@ -843,14 +838,10 @@ async function joinPeerRoom(room) {
 
   onRing((data, peerId) => {
     const callerName = data?.displayName || 'Участник';
-    // Don't show dialog if already in a call with this peer
     if (state.remoteStreams.has(peerId)) return;
-    // Don't show if we're the caller
     if (state._callingPeer === peerId) return;
-    // Don't show if dialog already visible
     if (document.getElementById('incomingCallDialog')) return;
     showIncomingCall(callerName, peerId);
-    _notifyIncomingCall(callerName);
   });
 
   onRingAccept((_data, peerId) => {
@@ -861,10 +852,9 @@ async function joinPeerRoom(room) {
   onRingDecline((_data, peerId) => {
     toast('Звонок отклонён.', 'warn');
     state._callingPeer = null;
-    const stop = _stopStreams.get(peerId);
-    if (stop) { try { stop(); } catch {} _stopStreams.delete(peerId); }
   });
 }
+
 
 function showIncomingCall(callerName, peerId) {
   if (document.getElementById('incomingCallDialog')) return;
