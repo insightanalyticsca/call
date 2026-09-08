@@ -925,15 +925,25 @@ function showIncomingCall(callerName, peerId) {
     if (state._sendRingAccept) state._sendRingAccept({}, peerId);
     toast('Подключение к звонку…', 'info');
     try {
-      await ensureLocalMedia(true).catch(async () => ensureLocalMedia(false));
+      // Try to get camera/mic, but DON'T let it block the call
+      try {
+        await ensureLocalMedia(true).catch(async () => ensureLocalMedia(false));
+      } catch (e) {
+        console.warn('[APP] camera/mic failed, continuing without:', e.message);
+      }
       if (state.localStream) {
         FB.setLocalStream(state.localStream);
       }
-      // Process the pending offer (or wait for it to arrive)
+      // MUST call acceptCall even without local media — the caller's
+      // video will still come through via ontrack
+      console.log('[APP] calling FB.acceptCall for', peerId?.slice(0, 12));
       await FB.acceptCall(peerId);
       toast('Видео подключено ✓', 'ok');
       updateCallGuide();
-    } catch (e) { toast('Не удалось подключиться: ' + e.message, 'bad'); }
+    } catch (e) {
+      console.error('[APP] acceptCall failed:', e.message, e.stack);
+      toast('Не удалось подключиться: ' + e.message, 'bad');
+    }
   };
   document.getElementById('declineCallBtn').onclick = () => {
     dialog.remove();

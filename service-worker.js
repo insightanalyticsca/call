@@ -1,5 +1,5 @@
 /* Service worker for Семейная связь (static GitHub Pages edition) */
-const CACHE = 'call-static-dbg2';
+const CACHE = 'call-static-dbg3';
 
 self.addEventListener('install', (event) => {
   const base = self.registration ? self.registration.scope : './';
