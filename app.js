@@ -820,17 +820,9 @@ async function joinPeerRoom(room) {
   setStatus($('#socketStatus'), 'Сигналинг: подключён (Firebase) ✓', 'ok');
   updateConnectionIndicator();
 
-  // Announce presence
+  // Announce presence once
   sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
-
-  // Periodic re-announce for 60s
-  if (state._helloInterval) clearInterval(state._helloInterval);
-  state._helloInterval = setInterval(() => {
-    if (!state._room) { clearInterval(state._helloInterval); return; }
-    sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
-    updateConnectionIndicator();
-  }, 5000);
-  setTimeout(() => { if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; } }, 60000);
+  // No periodic re-announce — SSE handles presence changes in real-time
 
   // Handlers
   onHello((data, peerId) => {
@@ -860,8 +852,12 @@ async function joinPeerRoom(room) {
 
   onRing((data, peerId) => {
     const callerName = data?.displayName || 'Участник';
+    // Don't show dialog if already in a call with this peer
     if (state.remoteStreams.has(peerId)) return;
+    // Don't show if we're the caller
     if (state._callingPeer === peerId) return;
+    // Don't show if dialog already visible
+    if (document.getElementById('incomingCallDialog')) return;
     showIncomingCall(callerName, peerId);
     _notifyIncomingCall(callerName);
   });
@@ -1033,18 +1029,13 @@ async function startCall() {
     return toast('В комнате нет других участников. Убедитесь, что оба выбрали одну комнату.', 'warn');
   }
 
-  // Send ring notification to all peers BEFORE starting the call
-  // This shows an "Incoming call" dialog on the other device
-  if (state._sendRing) {
-    state._sendRing({ displayName: state.user.displayName || state.user.username });
-  }
+  // No separate ring signal — the offer itself triggers the incoming call dialog
+  // on the other side (handled in fb-signaling.js _processSignal)
 
   await ensureLocalMedia(true).catch(async (e) => {
     toast(`${e.message} Пробую только микрофон.`, 'warn');
     return ensureLocalMedia(false);
   }).catch(() => {});
-  // Even without local media, proceed with the call — the other side
-  // will send their video, and we can at least receive audio/video
   if (!state.localStream) {
     toast('Нет камеры/микрофона. Попытка звонка без медиа…', 'warn');
   }

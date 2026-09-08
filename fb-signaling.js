@@ -211,9 +211,11 @@ const FB = (function () {
       console.log('[fb] offer received from', fromPeerId.slice(0, 12), '— storing as pending');
       _pendingOffers.set(fromPeerId, { signalData, fromPeerId });
       await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
-      // Notify the app that we have a pending offer (for the ring dialog)
-      const ringHandler = _handlers['ring'];
-      if (ringHandler) ringHandler({ displayName: signalData.displayName || 'Участник' }, fromPeerId);
+      // Trigger incoming call dialog — the offer IS the ring
+      // Only trigger if we don't already have a dialog showing
+      if (_handlers['ring']) {
+        _handlers['ring']({ displayName: signalData.displayName || 'Участник' }, fromPeerId);
+      }
       return;
     }
 
