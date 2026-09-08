@@ -5,6 +5,14 @@
  * Replaces fb-signaling.js WebRTC P2P + TURN entirely.
  * LiveKit handles signaling, NAT traversal, media relay.
  * No TURN needed — works on any network.
+ *
+ * v7 (lk7): CRITICAL FIX for asymmetric video.
+ *   All event handlers (participantConnected, trackSubscribed,
+ *   dataReceived, etc.) are now registered BEFORE room.connect().
+ *   Previously they were registered AFTER connect() returned,
+ *   which meant LiveKit fired trackSubscribed for existing
+ *   participants DURING the await — and we missed those events.
+ *   The result: A sees B but B doesn't see A.
  * ============================================================ */
 
 const LK = (function () {
@@ -19,13 +27,14 @@ const LK = (function () {
   let _onPeerLeave = null;
   let _peers = new Map();
   let _handlers = {};
+  let _dataHandlerBound = false;
 
   // Generate a LiveKit access token
   // Uses the jose library to create a JWT
   async function _createToken(roomName, participantName) {
     // Import jose for JWT creation
     const jose = await import('https://cdn.jsdelivr.net/npm/jose@5/+esm');
-    
+
     const payload = {
       iss: API_KEY,
       sub: participantName,
@@ -34,13 +43,26 @@ const LK = (function () {
       exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour
       video: { roomJoin: true, room: roomName },
     };
-    
+
     const secret = new TextEncoder().encode(API_SECRET);
     const token = await new jose.SignJWT(payload)
       .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
       .sign(secret);
-    
+
     return token;
+  }
+
+  // Single data-received dispatcher. Bound once per room.
+  function _bindDataHandler(room) {
+    if (!room || room._lkDataBound) return;
+    room._lkDataBound = true;
+    room.on('dataReceived', (payload, participant, kind, topic) => {
+      try {
+        const msg = JSON.parse(new TextDecoder().decode(payload));
+        const handler = _handlers[msg.kind];
+        if (handler) handler(msg.data, participant?.sid);
+      } catch (e) { /* ignore malformed */ }
+    });
   }
 
   return {
@@ -61,22 +83,76 @@ const LK = (function () {
     async joinRoom(roomId, userInfo) {
       // Load LiveKit SDK
       const lk = await import('https://cdn.jsdelivr.net/npm/livekit-client@2/+esm');
-    const Room = lk.Room;
-    const RoomEvent = lk.RoomEvent;
-    const TrackEvent = lk.TrackEvent;
-    // Store globally for makeAction
-    window._lkRoomEvent = RoomEvent;
-      
+      const Room = lk.Room;
+      const RoomEvent = lk.RoomEvent;
+      const TrackEvent = lk.TrackEvent;
+      // Store globally for makeAction
+      window._lkRoomEvent = RoomEvent;
+
       // Leave existing room
       if (_room) { try { await _room.disconnect(); } catch {} }
       _peers.clear();
+      _dataHandlerBound = false;
 
       // Create token
       const participantName = userInfo.displayName || userInfo.username || 'User';
       const token = await _createToken(roomId, participantName);
 
-      // Connect to LiveKit room
+      // Create the Room instance — do NOT connect yet.
       _room = new Room({ adaptiveStream: true, dynacast: true });
+
+      // ============================================================
+      // CRITICAL: register ALL event handlers BEFORE connect().
+      // LiveKit fires `trackSubscribed` for already-published tracks
+      // during the connect() await. If we register after, we miss them
+      // and end up with asymmetric video (A sees B, B doesn't see A).
+      // ============================================================
+      _room.on('participantConnected', (p) => {
+        console.log('[lk] participant joined:', p.identity);
+        _peers.set(p.sid, p.identity || p.name || 'Гость');
+        if (_onPeerJoin) _onPeerJoin(p.sid);
+      });
+
+      _room.on('participantDisconnected', (p) => {
+        console.log('[lk] participant left:', p.identity);
+        _peers.delete(p.sid);
+        if (_onPeerLeave) _onPeerLeave(p.sid);
+      });
+
+      _room.on('trackSubscribed', (track, pub, p) => {
+        console.log('[lk] track subscribed:', track?.kind, 'from:', p?.identity);
+        try {
+          const mediaTrack = track?.mediaStreamTrack || track;
+          if (mediaTrack) {
+            const stream = new MediaStream([mediaTrack]);
+            if (_onPeerStream) _onPeerStream(stream, p.sid);
+          }
+        } catch (e) { console.warn('[lk] track sub error:', e.message); }
+      });
+
+      _room.on('trackUnsubscribed', (track, pub, p) => {
+        console.log('[lk] track unsubscribed:', track?.kind, 'from:', p?.identity);
+        // Do NOT fire onPeerLeave here — only fire when the participant
+        // actually disconnects. A track can be unsubscribed while the
+        // participant is still in the room (e.g. they muted video).
+      });
+
+      _room.on('trackSubscriptionFailed', (track, pub, p, reason) => {
+        console.warn('[lk] track subscription failed:', pub?.trackSid, 'from:', p?.identity, 'reason:', reason);
+      });
+
+      _room.on('trackPublished', (pub, p) => {
+        // A remote participant published a new track. LiveKit will auto-subscribe
+        // (adaptiveStream) and fire `trackSubscribed` shortly after — no action here.
+        console.log('[lk] track published:', pub?.trackSid, 'kind:', pub?.kind, 'from:', p?.identity);
+      });
+
+      // Bind the data-received dispatcher once.
+      _bindDataHandler(_room);
+      _dataHandlerBound = true;
+
+      // Now connect — existing participants' tracks will fire trackSubscribed,
+      // and our handler will catch them.
       await _room.connect(LIVEKIT_URL, token);
       _localParticipant = _room.localParticipant;
 
@@ -91,54 +167,33 @@ const LK = (function () {
         console.warn('[lk] camera/mic failed:', e.message);
       }
 
-      // Handle existing remote participants
-      // Handle existing remote participants
-      const remoteParts = _room.remoteParticipants;
-      if (remoteParts) {
-        for (const [sid, p] of remoteParts.entries()) {
-          console.log('[lk] existing participant:', p.identity);
-          _peers.set(sid, p.identity || p.name || 'Гость');
-          if (_onPeerJoin) _onPeerJoin(sid);
-          // Check for existing tracks
-          for (const pub of p.trackPublications.values()) {
-            if (pub.track) {
-              const stream = new MediaStream([pub.track.mediaStreamTrack]);
-              if (_onPeerStream) _onPeerStream(stream, sid);
+      // Backup manual scan for existing participants — catches any edge cases
+      // where the SDK already had tracks subscribed before we registered handlers
+      // (shouldn't happen now, but kept as a safety net).
+      try {
+        const remoteParts = _room.remoteParticipants;
+        if (remoteParts) {
+          for (const [sid, p] of remoteParts.entries()) {
+            if (!_peers.has(sid)) {
+              console.log('[lk] existing participant (scan):', p.identity);
+              _peers.set(sid, p.identity || p.name || 'Гость');
+              if (_onPeerJoin) _onPeerJoin(sid);
+            }
+            for (const pub of p.trackPublications.values()) {
+              try {
+                if (pub.track && pub.track.mediaStreamTrack) {
+                  const stream = new MediaStream([pub.track.mediaStreamTrack]);
+                  if (_onPeerStream) _onPeerStream(stream, sid);
+                }
+              } catch (e) {
+                console.warn('[lk] scan track error:', e.message);
+              }
             }
           }
         }
+      } catch (e) {
+        console.warn('[lk] existing-participant scan failed:', e.message);
       }
-
-      // Handle new participants joining
-      _room.on('participantConnected', (p) => {
-        console.log('[lk] participant joined:', p.identity);
-        _peers.set(p.sid, p.identity || p.name || 'Гость');
-        if (_onPeerJoin) _onPeerJoin(p.sid);
-      });
-
-      // Handle participants leaving
-      _room.on('participantDisconnected', (p) => {
-        console.log('[lk] participant left:', p.identity);
-        _peers.delete(p.sid);
-        if (_onPeerLeave) _onPeerLeave(p.sid);
-      });
-
-      // Handle remote tracks being published
-      _room.on('trackSubscribed', (track, pub, p) => {
-        console.log('[lk] track subscribed:', track?.kind, 'from:', p?.identity);
-        try {
-          const mediaTrack = track?.mediaStreamTrack || track;
-          if (mediaTrack) {
-            const stream = new MediaStream([mediaTrack]);
-            if (_onPeerStream) _onPeerStream(stream, p.sid);
-          }
-        } catch (e) { console.warn('[lk] track sub error:', e.message); }
-      });
-
-      _room.on('trackUnsubscribed', (track, pub, p) => {
-        console.log('[lk] track unsubscribed from:', p.identity);
-        if (_onPeerLeave) _onPeerLeave(p.sid);
-      });
 
       return _localParticipant?.sid;
     },
@@ -150,6 +205,7 @@ const LK = (function () {
         _localParticipant = null;
       }
       _peers.clear();
+      _dataHandlerBound = false;
     },
 
     setLocalStream(stream) {
@@ -172,7 +228,6 @@ const LK = (function () {
     },
 
     makeAction(name) {
-      // Simple in-memory messaging via LiveKit data channels
       const send = (data, toPeerId) => {
         if (_room && _localParticipant) {
           try {
@@ -186,38 +241,22 @@ const LK = (function () {
         }
       };
       const onReceive = (handler) => { _handlers[name] = handler; };
-      
-      // Set up data handler if room exists
-      if (_room) {
-        _room.on('dataReceived', (payload, participant, kind, topic) => {
-          try {
-            const msg = JSON.parse(new TextDecoder().decode(payload));
-            const handler = _handlers[msg.kind];
-            if (handler) handler(msg.data, participant?.sid);
-          } catch {}
-        });
-      }
-      
+
+      // Ensure the data dispatcher is bound (idempotent — safe to call multiple times).
+      // In v7 the dispatcher is bound in joinRoom before connect, but makeAction may
+      // be called for rooms created later, so this is a safety net.
+      if (_room) _bindDataHandler(_room);
+
       return [send, onReceive];
     },
 
     set onPeerJoin(fn) { _onPeerJoin = fn; },
     set onPeerLeave(fn) { _onPeerLeave = fn; },
     set onPeerStream(fn) { _onPeerStream = fn; },
-    
-    // Allow setting up data handler before room exists
+
+    // Backwards-compat no-op — data handler is now bound inside joinRoom.
     _setupDataHandler() {
-      if (_room && _room._dataHandlerSet) return;
-      if (_room) {
-        _room._dataHandlerSet = true;
-        _room.on('dataReceived', (payload, participant) => {
-          try {
-            const msg = JSON.parse(new TextDecoder().decode(payload));
-            const handler = _handlers[msg.kind];
-            if (handler) handler(msg.data, participant?.sid);
-          } catch {}
-        });
-      }
+      if (_room) _bindDataHandler(_room);
     }
   };
 })();

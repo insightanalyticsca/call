@@ -84,7 +84,10 @@ const iconClasses = {
   'file': 'fa-file',
   'bars': 'fa-bars',
   'user-plus': 'fa-user-plus',
-  'key': 'fa-key'
+  'key': 'fa-key',
+  'users': 'fa-users',
+  'phone-volume': 'fa-phone-volume',
+  'circle-xmark': 'fa-circle-xmark'
 };
 function icon(name) { const fa = iconClasses[name] || 'fa-file'; return `<i class="fa-solid ${fa}" aria-hidden="true"></i>`; }
 function renderIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { el.innerHTML = icon(el.getAttribute('data-icon')); }); }
@@ -330,7 +333,7 @@ async function ensureDb() {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       settings: { title: 'Семейная связь', inviteBasePath: APP_URL('/') },
-      users: [], rooms: [], messages: [], media: [], events: []
+      users: [], rooms: [], messages: [], media: [], events: [], pendingCalls: []
     };
     await saveDb(_db);
   }
@@ -431,6 +434,8 @@ async function login() {
   u.lastLoginAt = new Date().toISOString();
   saveDb(_db).catch((e) => console.warn('lastLoginAt save failed', e));
   await refreshAll();
+  try { refreshUsers(); } catch {}
+  try { monitorPendingCalls(); } catch (e) { console.warn('monitorPendingCalls:', e); }
   const joinedFromInvite = await autoJoinFromUrl();
   maybeOpenRoomChooser(joinedFromInvite);
 }
@@ -451,6 +456,8 @@ async function loadMe() {
   state.user = { id: u.id, username: u.username, displayName: u.displayName, role: u.role };
   requireLoginUi();
   await refreshAll();
+  try { refreshUsers(); } catch {}
+  try { monitorPendingCalls(); } catch (e) { console.warn('monitorPendingCalls:', e); }
   const joinedFromInvite = await autoJoinFromUrl();
   maybeOpenRoomChooser(joinedFromInvite);
 }
@@ -1291,17 +1298,55 @@ async function startRecording() {
     const modeInput = document.querySelector('input[name="recordMode"]:checked');
     const mode = modeInput ? modeInput.value : 'audio';
     if (!window.MediaRecorder) throw new Error('Этот браузер не поддерживает MediaRecorder.');
-    toast(`Запрос доступа к ${mode === 'video' ? 'камере и микрофону' : 'микрофону'}…`, 'info');
-    const stream = await getUserMediaCompat(mode === 'video'
-      ? { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: 1.777 }, audio: true }
-      : { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+
+    // ----------------------------------------------------------------
+    // v7 fix: reusing the active call stream prevents the "no video
+    // after stop recording" bug. On iOS Safari and many Android Chrome
+    // versions the camera is a single-tenant resource — calling
+    // getUserMedia a second time for the same camera, then stopping
+    // those tracks in recorder.onstop, releases the underlying camera
+    // and kills the call's video track as well.
+    //
+    // Strategy: clone the tracks from state.localStream when available.
+    // Cloned tracks share the same source but stopping a clone does NOT
+    // stop the original — the call's video stays alive.
+    // ----------------------------------------------------------------
+    let stream = null;
+    let reusedCallStream = false;
+
+    if (state.localStream) {
+      const hasVid = hasVideoTrack(state.localStream);
+      const hasAud = hasAudioTrack(state.localStream);
+      const needVid = (mode === 'video');
+      if (needVid && hasVid && hasAud) {
+        stream = new MediaStream();
+        state.localStream.getTracks().forEach((t) => stream.addTrack(t.clone()));
+        reusedCallStream = true;
+        console.log('[recording] reusing call stream tracks (cloned)');
+      } else if (!needVid && hasAud) {
+        stream = new MediaStream([state.localStream.getAudioTracks()[0].clone()]);
+        reusedCallStream = true;
+        console.log('[recording] reusing call audio track (cloned)');
+      }
+    }
+
+    if (!stream) {
+      toast(`Запрос доступа к ${mode === 'video' ? 'камере и микрофону' : 'микрофону'}…`, 'info');
+      stream = await getUserMediaCompat(mode === 'video'
+        ? { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: 1.777 }, audio: true }
+        : { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+    }
+
     state.recordChunks = [];
     const mime = mode === 'video' ? pickMime(['video/webm;codecs=vp9,opus', 'video/webm', 'video/mp4']) : pickMime(['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']);
     state.recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
     state.recorder.ondataavailable = (e) => { if (e.data && e.data.size) state.recordChunks.push(e.data); };
     state.recorder.onstop = async () => {
       const blob = new Blob(state.recordChunks, { type: state.recorder.mimeType || (mode === 'video' ? 'video/webm' : 'audio/webm') });
-      stream.getTracks().forEach((t) => t.stop());
+      // Stop the recording stream's tracks.
+      // If we reused call stream tracks, these are CLONES — stopping them
+      // is safe and does NOT affect the call's video.
+      stream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
       const note = $('#mailNote').value.trim();
       const name = `${mode}-mail-${Date.now()}.webm`;
       toast('Сохранение в GitHub…', 'info');
@@ -1329,7 +1374,7 @@ async function startRecording() {
       $('#mailEmpty')?.classList.remove('hidden');
     }
     updateMailGuide();
-    toast(`Запись начата (${mode === 'video' ? 'видео' : 'аудио'}) ✓`, 'ok');
+    toast(`Запись начата (${mode === 'video' ? 'видео' : 'аудио'})${reusedCallStream ? ' (звонок активен)' : ''} ✓`, 'ok');
     startRecordTimer();
   } catch (e) {
     console.error('[recording] error', e);
@@ -1607,31 +1652,57 @@ async function deleteMedia(id) {
  * Admin: user management (GitHub-backed db.json)
  * ============================================================ */
 async function refreshUsers() {
-  if (!state.user || state.user.role !== 'admin') return;
+  if (!state.user) return;
   await ensureDb();
-  state.users = _db.users;
+  state.users = _db.users || [];
   renderUsers();
 }
 function renderUsers() {
   const box = $('#usersList');
+  const isAdmin = state.user?.role === 'admin';
   if (!state.users.length) { box.className = 'list empty'; box.textContent = 'Нет пользователей.'; return; }
   box.className = 'list';
-  box.innerHTML = state.users.map((u) => `
-    <div class="user-item" data-id="${u.id}">
-      <div class="user-row"><div><strong>${escapeHtml(u.displayName || u.username)}</strong><div class="meta">${escapeHtml(u.username)} · ${u.role}${u.disabled ? ' · отключён' : ''}</div></div></div>
+  box.innerHTML = state.users.map((u) => {
+    const isSelf = (u.id === state.user.id);
+    const meta = isAdmin
+      ? `${escapeHtml(u.username)} · ${u.role}${u.disabled ? ' · отключён' : ''}${u.lastLoginAt ? ' · вход ' + fmtTime(u.lastLoginAt) : ''}`
+      : (isSelf ? 'это вы' : 'пользователь');
+    const callBtn = isSelf ? '' : `<button class="small icon-action primary call-user" data-id="${u.id}" data-tip="Позвонить" title="Позвонить" aria-label="Позвонить"><span data-icon="phone"></span></button>`;
+    const adminActions = !isAdmin ? '' : `
+      <div class="user-actions">
+        <button class="small icon-action edit-user" data-id="${u.id}" data-tip="Имя/роль" title="Имя/роль" aria-label="Имя/роль"><span data-icon="file-lines"></span></button>
+        ${!isSelf ? `<button class="small icon-action danger delete-user" data-id="${u.id}" data-tip="Удалить" title="Удалить" aria-label="Удалить"><span data-icon="trash"></span></button>` : ''}
+      </div>`;
+    const adminPassRow = !isAdmin ? '' : `
       <div class="user-password-row">
         <input class="user-pass-input" data-id="${u.id}" type="password" placeholder="Новый пароль для ${escapeHtml(u.username)}" autocomplete="new-password" />
         <button class="small icon-action primary change-pass" data-id="${u.id}" data-tip="Сменить пароль" title="Сменить пароль" aria-label="Сменить пароль"><span data-icon="key"></span></button>
+      </div>`;
+    return `
+    <div class="user-item" data-id="${u.id}">
+      <div class="user-row">
+        <div>
+          <strong>${escapeHtml(u.displayName || u.username)}${isSelf ? ' (вы)' : ''}</strong>
+          <div class="meta">${meta}</div>
+        </div>
+        ${callBtn}
       </div>
-      <div class="user-actions">
-        <button class="small icon-action edit-user" data-id="${u.id}" data-tip="Имя/роль" title="Имя/роль" aria-label="Имя/роль"><span data-icon="file-lines"></span></button>
-        ${u.id !== state.user.id ? `<button class="small icon-action danger delete-user" data-id="${u.id}" data-tip="Удалить" title="Удалить" aria-label="Удалить"><span data-icon="trash"></span></button>` : ''}
-      </div>
-    </div>`).join('');
+      ${adminPassRow}
+      ${adminActions}
+    </div>`;
+  }).join('');
   renderIcons(box);
-  box.querySelectorAll('.change-pass').forEach((b) => b.onclick = () => changeUserPassword(b.dataset.id));
-  box.querySelectorAll('.edit-user').forEach((b) => b.onclick = () => editUser(b.dataset.id));
-  box.querySelectorAll('.delete-user').forEach((b) => b.onclick = () => deleteUser(b.dataset.id));
+  box.querySelectorAll('.call-user').forEach((b) => b.onclick = () => callUser(b.dataset.id));
+  if (isAdmin) {
+    box.querySelectorAll('.change-pass').forEach((b) => b.onclick = () => changeUserPassword(b.dataset.id));
+    box.querySelectorAll('.edit-user').forEach((b) => b.onclick = () => editUser(b.dataset.id));
+    box.querySelectorAll('.delete-user').forEach((b) => b.onclick = () => deleteUser(b.dataset.id));
+  }
+  // Update the card title based on role
+  const cardTitle = $('#usersCardTitle');
+  const heading = $('#peopleHeading');
+  if (cardTitle) cardTitle.textContent = isAdmin ? 'Пользователи' : 'Контакты';
+  if (heading) heading.textContent = isAdmin ? 'Админ' : 'Контакты';
 }
 async function changeUserPassword(id) {
   const input = $(`.user-pass-input[data-id="${CSS.escape(id)}"]`);
@@ -1708,7 +1779,7 @@ async function resetAllData() {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     settings: { title: 'Семейная связь' },
-    users: [], rooms: [], messages: [], media: [], events: []
+    users: [], rooms: [], messages: [], media: [], events: [], pendingCalls: []
   };
   await saveDb(_db);
   await seedDefaultUsers();
@@ -1719,6 +1790,306 @@ async function resetAllData() {
   resetCall();
   requireLoginUi();
   toast('Данные сброшены.', 'ok');
+}
+
+/* ============================================================
+ * Cross-room calls (v7) — call any logged-in user via db.json
+ *
+ * Flow:
+ *   1. Caller clicks "Позвонить" next to a user in the People tab.
+ *   2. Caller creates a private room (code = CALL_<random>),
+ *      joins it (LiveKit), and writes a pendingCall record to db.json.
+ *   3. All clients poll db.json every 10s. When the callee's client
+ *      sees a pendingCall addressed to them with status 'pending',
+ *      it shows an incoming-call dialog.
+ *   4. Callee accepts  → joins the same room, updates status to 'accepted'.
+ *      Callee declines → updates status to 'declined'.
+ *   5. Caller's client sees the status change:
+ *      'accepted' → close waiting dialog, stay in room (call active).
+ *      'declined' → close waiting dialog, leave room, toast.
+ *   6. Stale pendingCalls (older than 5 minutes) are auto-cleaned.
+ * ============================================================ */
+
+const PENDING_CALL_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function _genCallCode() {
+  // 6-char base32 code, prefixed to avoid collision with regular room codes
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 6; i++) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return `CALL_${s}`;
+}
+
+async function callUser(targetUserId) {
+  if (!state.user) return;
+  if (targetUserId === state.user.id) return toast('Нельзя позвонить себе.', 'warn');
+  await ensureDb();
+
+  const target = (_db.users || []).find((u) => u.id === targetUserId);
+  if (!target) return toast('Пользователь не найден.', 'bad');
+  if (target.disabled) return toast('Пользователь отключён.', 'warn');
+
+  // Don't allow a second outgoing call while one is pending
+  if ((_db.pendingCalls || []).some((c) => c.callerId === state.user.id && c.status === 'pending')) {
+    return toast('У вас уже есть активный звонок. Сначала отмените его.', 'warn');
+  }
+
+  const code = _genCallCode();
+  const callId = randomId('call_');
+  const now = new Date().toISOString();
+
+  // Create the private room locally + join it via LiveKit
+  const room = {
+    id: randomId('room_'),
+    code,
+    title: `Звонок: ${state.user.displayName || state.user.username} → ${target.displayName || target.username}`,
+    ownerId: state.user.id,
+    guestUserIds: [target.id],
+    active: true,
+    inviteToken: randomToken(),
+    isPublic: false, // private — only show to caller + callee
+    createdAt: now,
+    updatedAt: now,
+    lastJoinAt: now,
+    kind: 'direct'
+  };
+  _db.rooms.unshift(room);
+  if (!state.rooms.some((r) => r.id === room.id)) state.rooms.unshift(room);
+
+  // Write pendingCall record so the callee sees the incoming call
+  const pendingCall = {
+    id: callId,
+    callerId: state.user.id,
+    callerName: state.user.displayName || state.user.username,
+    calleeId: target.id,
+    calleeName: target.displayName || target.username,
+    roomCode: code,
+    roomId: room.id,
+    status: 'pending',
+    createdAt: now,
+    updatedAt: now
+  };
+  if (!_db.pendingCalls) _db.pendingCalls = [];
+  _db.pendingCalls.unshift(pendingCall);
+  await saveDb(_db);
+
+  // Switch to calls tab + join the room
+  tab('calls');
+  await selectRoom(room.id, room.inviteToken);
+  // Auto-enable camera + mic for the call
+  try { await ensureLocalMedia(true); } catch (e) { console.warn('[callUser] camera init failed:', e.message); }
+
+  // Show "calling…" waiting dialog
+  _showOutgoingCallDialog(pendingCall);
+  toast(`Звоню: ${target.displayName || target.username}…`, 'info');
+  _playSound(800, 300, 'ring');
+}
+
+function _showOutgoingCallDialog(call) {
+  _closeOutgoingCallDialog();
+  const dialog = document.createElement('div');
+  dialog.id = 'outgoingCallDialog';
+  dialog.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(17,24,39,0.98);backdrop-filter:blur(40px);border:1px solid var(--glass-border-strong);border-radius:24px;padding:28px;text-align:center;z-index:300;box-shadow:var(--shadow-lg);min-width:280px';
+  dialog.innerHTML = `
+    <div style="width:64px;height:64px;border-radius:50%;margin:0 auto 16px;display:grid;place-items:center;font-size:24px;font-weight:800;background:var(--accent-grad);color:white;animation:avatarFloat 2s ease-in-out infinite">📞</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:4px">Звоню…</div>
+    <div style="font-size:14px;color:var(--text-muted);margin-bottom:20px">${escapeHtml(call.calleeName)}</div>
+    <div id="outgoingCallTimer" style="font-size:13px;color:var(--text-muted);margin-bottom:16px;font-variant-numeric:tabular-nums">00:00</div>
+    <button id="cancelOutgoingCallBtn" style="min-height:48px;padding:0 24px;border-radius:14px;background:var(--danger-grad);color:white;border:none;font-weight:700;cursor:pointer">Отменить</button>`;
+  document.body.appendChild(dialog);
+  document.getElementById('cancelOutgoingCallBtn').onclick = () => cancelPendingCall(call.id);
+  // Timer
+  const startedAt = Date.now();
+  dialog._timer = setInterval(() => {
+    const el = document.getElementById('outgoingCallTimer');
+    if (!el) return;
+    const s = Math.floor((Date.now() - startedAt) / 1000);
+    el.textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  }, 500);
+  // Auto-cancel after 60s of no answer
+  dialog._timeout = setTimeout(() => {
+    if (document.getElementById('outgoingCallDialog')) cancelPendingCall(call.id, 'no answer');
+  }, 60000);
+}
+
+function _closeOutgoingCallDialog() {
+  const d = document.getElementById('outgoingCallDialog');
+  if (d) {
+    if (d._timer) clearInterval(d._timer);
+    if (d._timeout) clearTimeout(d._timeout);
+    d.remove();
+  }
+}
+
+async function cancelPendingCall(callId, reason = 'cancelled') {
+  await ensureDb();
+  const call = (_db.pendingCalls || []).find((c) => c.id === callId);
+  if (!call) { _closeOutgoingCallDialog(); return; }
+  if (call.status !== 'pending') { _closeOutgoingCallDialog(); return; }
+  call.status = 'cancelled';
+  call.updatedAt = new Date().toISOString();
+  await saveDb(_db);
+  _closeOutgoingCallDialog();
+  // Leave the room we created for this call
+  if (state.currentRoom?.code === call.roomCode) {
+    await leaveRoom();
+  }
+  toast(reason === 'no answer' ? 'Нет ответа. Звонок отменён.' : 'Звонок отменён.', 'warn');
+}
+
+async function acceptPendingCall(callId) {
+  await ensureDb();
+  const call = (_db.pendingCalls || []).find((c) => c.id === callId);
+  if (!call) return;
+  if (call.status !== 'pending') return;
+  call.status = 'accepted';
+  call.updatedAt = new Date().toISOString();
+  await saveDb(_db);
+  _closeIncomingCallDialog();
+
+  // Find the room by code, or create a local entry if not visible
+  let room = (_db.rooms || []).find((r) => r.code === call.roomCode);
+  if (!room) {
+    // Caller's room record hasn't propagated yet — create a placeholder
+    room = {
+      id: call.roomId || randomId('room_'),
+      code: call.roomCode,
+      title: `Звонок: ${call.callerName} → ${call.calleeName}`,
+      ownerId: call.callerId,
+      guestUserIds: [call.calleeId],
+      active: true,
+      inviteToken: randomToken(),
+      isPublic: false,
+      createdAt: call.createdAt,
+      updatedAt: new Date().toISOString(),
+      lastJoinAt: new Date().toISOString(),
+      kind: 'direct'
+    };
+    _db.rooms.unshift(room);
+    await saveDb(_db);
+  }
+  if (!state.rooms.some((r) => r.id === room.id)) state.rooms.unshift(room);
+
+  // Switch to calls tab + join the room
+  tab('calls');
+  await selectRoom(room.id, room.inviteToken);
+  // Auto-enable camera + mic
+  try { await ensureLocalMedia(true); } catch (e) { console.warn('[acceptPendingCall] camera init failed:', e.message); }
+  toast(`Подключение к звонку с ${call.callerName}…`, 'info');
+}
+
+async function declinePendingCall(callId) {
+  await ensureDb();
+  const call = (_db.pendingCalls || []).find((c) => c.id === callId);
+  if (!call) return;
+  if (call.status !== 'pending') return;
+  call.status = 'declined';
+  call.updatedAt = new Date().toISOString();
+  await saveDb(_db);
+  _closeIncomingCallDialog();
+  toast('Звонок отклонён.', 'warn');
+}
+
+function _closeIncomingCallDialog() {
+  const d = document.getElementById('incomingCallDialog');
+  if (d) d.remove();
+}
+
+// Set of call IDs we've already shown an incoming-call dialog for,
+// to avoid re-prompting on every db.json poll.
+const _shownIncomingCallIds = new Set();
+// Call ID we're currently ringing for (sound loop)
+let _incomingRingTimer = null;
+
+function monitorPendingCalls() {
+  if (!state.user) return;
+  if (!_db) return;
+  const calls = _db.pendingCalls || [];
+  const now = Date.now();
+
+  // Auto-clean stale calls (older than TTL) — anyone can clean
+  let cleaned = false;
+  for (const c of calls) {
+    const age = now - new Date(c.createdAt).getTime();
+    if (c.status === 'pending' && age > PENDING_CALL_TTL_MS) {
+      c.status = 'expired';
+      c.updatedAt = new Date().toISOString();
+      cleaned = true;
+    }
+  }
+  if (cleaned) {
+    _db.pendingCalls = calls.filter((c) => c.status !== 'expired' && (now - new Date(c.createdAt).getTime() < 24 * 60 * 60 * 1000));
+    saveDb(_db).catch(() => {});
+  }
+
+  // Look for incoming calls addressed to me
+  const incoming = calls.find((c) => c.calleeId === state.user.id && c.status === 'pending');
+  if (incoming && !_shownIncomingCallIds.has(incoming.id)) {
+    _shownIncomingCallIds.add(incoming.id);
+    _showIncomingCallFromDb(incoming);
+  } else if (!incoming) {
+    // No active incoming call — stop ringing + close dialog
+    _stopIncomingRing();
+    _closeIncomingCallDialog();
+  }
+
+  // Look for outgoing calls I placed — react to status changes
+  const outgoing = calls.find((c) => c.callerId === state.user.id && (c.status === 'pending' || c.status === 'accepted' || c.status === 'declined'));
+  if (outgoing && outgoing.status === 'accepted') {
+    if (document.getElementById('outgoingCallDialog')) {
+      _closeOutgoingCallDialog();
+      toast(`${outgoing.calleeName} принял звонок ✓`, 'ok');
+    }
+  } else if (outgoing && outgoing.status === 'declined') {
+    if (document.getElementById('outgoingCallDialog')) {
+      _closeOutgoingCallDialog();
+      toast(`${outgoing.calleeName} отклонил звонок.`, 'warn');
+      // Leave the room we created
+      if (state.currentRoom?.code === outgoing.roomCode) {
+        leaveRoom().catch(() => {});
+      }
+    }
+  }
+}
+
+function _showIncomingCallFromDb(call) {
+  _closeIncomingCallDialog();
+  const dialog = document.createElement('div');
+  dialog.id = 'incomingCallDialog';
+  dialog.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(17,24,39,0.98);backdrop-filter:blur(40px);border:1px solid var(--glass-border-strong);border-radius:24px;padding:28px;text-align:center;z-index:300;box-shadow:var(--shadow-lg);min-width:280px';
+  dialog.innerHTML = `
+    <div style="width:64px;height:64px;border-radius:50%;margin:0 auto 16px;display:grid;place-items:center;font-size:24px;font-weight:800;background:var(--accent-grad);color:white;animation:avatarFloat 2s ease-in-out infinite">📞</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:4px">Входящий звонок</div>
+    <div style="font-size:14px;color:var(--text-muted);margin-bottom:20px">${escapeHtml(call.callerName)} звонит вам</div>
+    <div style="display:flex;gap:10px;justify-content:center">
+      <button id="declineDbCallBtn" style="min-height:48px;padding:0 24px;border-radius:14px;background:var(--danger-grad);color:white;border:none;font-weight:700;cursor:pointer">Отклонить</button>
+      <button id="acceptDbCallBtn" style="min-height:48px;padding:0 24px;border-radius:14px;background:var(--success-grad);color:#021307;border:none;font-weight:700;cursor:pointer">Принять</button>
+    </div>`;
+  document.body.appendChild(dialog);
+  document.getElementById('acceptDbCallBtn').onclick = () => acceptPendingCall(call.id);
+  document.getElementById('declineDbCallBtn').onclick = () => declinePendingCall(call.id);
+  // Play ring sound every 2s until answered/declined
+  _startIncomingRing();
+  // Auto-decline after 60s
+  dialog._timeout = setTimeout(() => {
+    if (document.getElementById('incomingCallDialog')) declinePendingCall(call.id);
+  }, 60000);
+}
+
+function _startIncomingRing() {
+  _stopIncomingRing();
+  _playSound(800, 300, 'ring');
+  _incomingRingTimer = setInterval(() => {
+    if (!document.getElementById('incomingCallDialog')) {
+      _stopIncomingRing();
+      return;
+    }
+    _playSound(800, 300, 'ring');
+  }, 2000);
+}
+
+function _stopIncomingRing() {
+  if (_incomingRingTimer) { clearInterval(_incomingRingTimer); _incomingRingTimer = null; }
 }
 
 /* ---------- File picker text ---------- */
@@ -2093,7 +2464,8 @@ async function init() {
       try { refreshMessages(); } catch {}
       try { refreshMail(); } catch {}
       try { refreshFiles(); } catch {}
-      try { if (state.user.role === 'admin') refreshUsers(); } catch {}
+      try { refreshUsers(); } catch {}
+      try { monitorPendingCalls(); } catch (e) { console.warn('monitorPendingCalls:', e); }
     }
   });
   // Periodic health check (rate limit display)

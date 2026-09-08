@@ -7,7 +7,7 @@
   <title>Семейная связь</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="styles.css?v=20260727-lk6" />
+  <link rel="stylesheet" href="styles.css?v=20260727-lk7" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
   <script>
     // Synchronously restore session BEFORE page renders — prevents login screen flash on reload
@@ -26,10 +26,10 @@
     })();
   </script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" defer></script>
-  <script src="livekit.js?v=20260727-lk6" defer></script>
-  <script src="fb-signaling.js?v=20260727-lk6" defer></script>
-  <script src="gh-store.js?v=20260727-lk6" defer></script>
-  <script src="app.js?v=20260727-lk6" defer></script>
+  <script src="livekit.js?v=20260727-lk7" defer></script>
+  <script src="fb-signaling.js?v=20260727-lk7" defer></script>
+  <script src="gh-store.js?v=20260727-lk7" defer></script>
+  <script src="app.js?v=20260727-lk7" defer></script>
 </head>
 <body class="auth-only">
   <noscript>Для работы приложения нужен JavaScript.</noscript>
@@ -254,10 +254,10 @@
 
     <section id="admin" class="tab-panel content-page">
       <div class="content-head">
-        <div><div class="eyebrow">Управление</div><h2>Админ</h2></div>
+        <div><div class="eyebrow">Управление</div><h2 id="peopleHeading">Контакты</h2></div>
         <button class="round-glass menu-open" title="Меню"><span data-icon="bars"></span></button>
       </div>
-      <article class="glass-card admin-card">
+      <article class="glass-card admin-card admin-only hidden">
         <h3>Новый пользователь</h3>
         <div class="admin-form">
           <input id="newUserName" placeholder="login" />
@@ -268,10 +268,10 @@
         </div>
       </article>
       <article class="glass-card admin-card">
-        <div class="card-head"><h3>Пользователи</h3><button id="refreshUsersBtn" class="ghost small icon-action" data-tip="Обновить" title="Обновить" aria-label="Обновить"><span data-icon="rotate"></span></button></div>
+        <div class="card-head"><h3 id="usersCardTitle">Контакты</h3><button id="refreshUsersBtn" class="ghost small icon-action" data-tip="Обновить" title="Обновить" aria-label="Обновить"><span data-icon="rotate"></span></button></div>
         <div id="usersList" class="list empty">Нет данных.</div>
       </article>
-      <article class="glass-card admin-card">
+      <article class="glass-card admin-card admin-only hidden">
         <div class="card-head"><h3>Опасная зона</h3></div>
         <button id="resetAllBtn" class="ghost danger-soft"><span data-icon="trash"></span><span>Сбросить все локальные данные</span></button>
         <p class="hint" style="margin-top:8px">Удалит пользователей, комнаты, сообщения и загруженные файлы из этого браузера.</p>
@@ -287,7 +287,7 @@
         <button class="tab menu-tile" data-tab="mail"><span data-icon="microphone"></span><strong>Почта</strong><small>audio/video</small></button>
         <button class="tab menu-tile" data-tab="files"><span data-icon="folder"></span><strong>Файлы</strong><small>upload/replay/dl</small></button>
         <button class="tab menu-tile" data-tab="stats"><span data-icon="signal"></span><strong>Статы</strong><small>графики</small></button>
-        <button class="tab menu-tile admin-only hidden" data-tab="admin"><span data-icon="user-gear"></span><strong>Админ</strong><small>users/pass</small></button>
+        <button class="tab menu-tile" data-tab="admin"><span data-icon="users"></span><strong>Люди</strong><small>контакты и звонки</small></button>
       </div>
       <div id="userCard" class="user-card hidden">
         <div><div class="eyebrow">Вы вошли как</div><strong id="userName">-</strong></div>
