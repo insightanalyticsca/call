@@ -11,11 +11,19 @@
 const FB = (function () {
   const DB_URL = 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app';
   const ICE_SERVERS = [
+    // STUN servers (for discovering public IP)
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelay', credential: 'openrelay' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelay', credential: 'openrelay' },
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelay', credential: 'openrelay' }
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    // TURN servers (relay for NAT traversal — required for mobile/cellular)
+    // OpenRelay is down — using metered relay instead
+    { urls: 'turn:turn.relay.metered.ca:80', username: 'free', credential: 'free' },
+    { urls: 'turn:turn.relay.metered.ca:443', username: 'free', credential: 'free' },
+    { urls: 'turn:turn.relay.metered.ca:443?transport=tcp', username: 'free', credential: 'free' },
+    { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', credential: 'webrtc', username: 'webrtc' },
   ];
 
   let _selfId = null;

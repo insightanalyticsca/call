@@ -43,11 +43,15 @@ const ROOM_PEER_ID = (code) => `${PEER_ID_PREFIX}room-${code.toLowerCase()}`;
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
   { urls: 'stun:global.stun.twilio.com:3478' },
-  // Free TURN servers from OpenRelay (for NAT traversal on mobile networks)
-  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelay', credential: 'openrelay' },
-  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelay', credential: 'openrelay' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelay', credential: 'openrelay' }
+  // TURN servers (relay for NAT traversal — required for mobile/cellular)
+  { urls: 'turn:turn.relay.metered.ca:80', username: 'free', credential: 'free' },
+  { urls: 'turn:turn.relay.metered.ca:443', username: 'free', credential: 'free' },
+  { urls: 'turn:turn.relay.metered.ca:443?transport=tcp', username: 'free', credential: 'free' },
+  { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', credential: 'webrtc', username: 'webrtc' },
 ];
 
 /* ---------- IndexedDB shim removed — all media now lives in GitHub repo ---------- */
