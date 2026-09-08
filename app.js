@@ -893,13 +893,7 @@ function showIncomingCall(callerName, peerId) {
       } catch (e) {
         console.warn('[APP] camera/mic failed, continuing without:', e.message);
       }
-      // MUST set localStream before acceptCall so tracks are in the answer
-      if (state.localStream) {
-        FB.setLocalStream(state.localStream);
-        console.log('[APP] localStream set before accept: ' + state.localStream.getTracks().length + ' tracks');
-      }
-      console.log('[APP] calling FB.acceptCall for', peerId?.slice(0, 12));
-      await FB.acceptCall(peerId);
+      // LiveKit handles tracks automatically — just accept
       toast('Видео подключено ✓', 'ok');
       updateCallGuide();
     } catch (e) {
@@ -925,8 +919,7 @@ function trysteroBroadcast(obj) {
 }
 
 async function disconnectPeer() {
-  if (state._helloInterval) { clearInterval(state._helloInterval); state._helloInterval = null; }
-  await FB.leave();
+  await LK.leave();
   _peerNames.clear();
   for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
   _stopStreams.clear();
@@ -1063,12 +1056,6 @@ async function startCall() {
     if (_stopStreams.has(peerId)) continue;
     state._callingPeer = peerId;
     try {
-      await FB.startCall(peerId);
-      _stopStreams.set(peerId, () => FB.stopStream(peerId));
-      initiated++;
-    } catch (e) {
-      console.warn('[call] failed for', peerId.slice(0, 12), e);
-    }
   }
 
   if (initiated) {
@@ -1085,10 +1072,8 @@ async function startCall() {
 
 function hangup(notify = true) {
   if (notify) trysteroBroadcast({ kind: 'hangup' });
-  // Exit fullscreen if active
   if (document.fullscreenElement) { document.exitFullscreen?.().catch(() => {}); }
   else if (document.webkitFullscreenElement) { document.webkitExitFullscreen?.(); }
-  for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
   _stopStreams.clear();
   state.remoteStreams.clear();
   $('#remoteVideo').srcObject = null;
@@ -2116,10 +2101,10 @@ async function init() {
   setInterval(checkHealth, 60000);
   // Leave Trystero room on page close
   window.addEventListener('beforeunload', () => {
-    if (state._room) { try { FB.leave(); } catch {} }
+    if (state._room) { try { LK.leave(); } catch {} }
   });
   window.addEventListener('pagehide', () => {
-    if (state._room) { try { FB.leave(); } catch {} }
+    if (state._room) { try { LK.leave(); } catch {} }
   });
   // Show invite hint on login screen if there's a room in URL
   const params = new URLSearchParams(location.search);
