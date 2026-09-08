@@ -776,7 +776,20 @@ async function joinPeerRoom(room) {
   };
 
   LK.onPeerStream = (stream, peerId) => {
-    state.remoteStreams.set(peerId, stream);
+    // LiveKit sends tracks one at a time — merge into existing stream
+    let existing = state.remoteStreams.get(peerId);
+    if (existing) {
+      // Add new tracks to existing stream
+      stream.getTracks().forEach(t => {
+        // Remove old track of same kind
+        existing.getTracks().forEach(old => {
+          if (old.kind === t.kind) existing.removeTrack(old);
+        });
+        existing.addTrack(t);
+      });
+    } else {
+      state.remoteStreams.set(peerId, stream);
+    }
     updateRemoteVideo();
     setStatus($('#peerStatus'), 'WebRTC: connected', 'ok');
     $('#pcState').textContent = 'PC: connected (' + state.remoteStreams.size + ')';
@@ -1051,11 +1064,6 @@ async function startCall() {
 
   if (initiated) {
     toast(`Звонок отправлен (${initiated}). Ожидание ответа…`, 'ok');
-    setTimeout(() => {
-      if (state.remoteStreams.size === 0) {
-        toast('Соединение не установлено за 10с. Проверьте, что оба устройства в одной комнате.', 'warn');
-      }
-    }, 10000);
   } else {
     toast('Не удалось позвонить.', 'bad');
   }
