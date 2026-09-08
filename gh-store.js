@@ -313,7 +313,8 @@ const GH = (function () {
 
   async function getFile(id) {
     // Check for manifest (chunked file)
-    const manifestResp = await getContents(`files/${id}_manifest`);
+    let manifestResp = null;
+    try { manifestResp = await getContents(`files/${id}_manifest`); } catch {}
     if (manifestResp && manifestResp.content) {
       // Chunked file — fetch all chunks and reassemble
       const manifestB64 = manifestResp.content.replace(/\s+/g, '');

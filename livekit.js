@@ -92,40 +92,50 @@ const LK = (function () {
       }
 
       // Handle existing remote participants
-      for (const p of _room.remoteParticipants.values()) {
-        _peers.set(p.sid, p.identity || p.name || 'Гость');
-        if (_onPeerJoin) _onPeerJoin(p.sid);
-        // Subscribe to their tracks
-        for (const pub of p.trackPublications.values()) {
-          if (pub.track) {
-            const stream = new MediaStream([pub.track.mediaStreamTrack]);
-            if (_onPeerStream) _onPeerStream(stream, p.sid);
+      // Handle existing remote participants
+      const remoteParts = _room.remoteParticipants;
+      if (remoteParts) {
+        for (const [sid, p] of remoteParts.entries()) {
+          console.log('[lk] existing participant:', p.identity);
+          _peers.set(sid, p.identity || p.name || 'Гость');
+          if (_onPeerJoin) _onPeerJoin(sid);
+          // Check for existing tracks
+          for (const pub of p.trackPublications.values()) {
+            if (pub.track) {
+              const stream = new MediaStream([pub.track.mediaStreamTrack]);
+              if (_onPeerStream) _onPeerStream(stream, sid);
+            }
           }
         }
       }
 
       // Handle new participants joining
-      _room.on(RoomEvent.ParticipantConnected, (p) => {
+      _room.on('participantConnected', (p) => {
         console.log('[lk] participant joined:', p.identity);
         _peers.set(p.sid, p.identity || p.name || 'Гость');
         if (_onPeerJoin) _onPeerJoin(p.sid);
       });
 
       // Handle participants leaving
-      _room.on(RoomEvent.ParticipantDisconnected, (p) => {
+      _room.on('participantDisconnected', (p) => {
         console.log('[lk] participant left:', p.identity);
         _peers.delete(p.sid);
         if (_onPeerLeave) _onPeerLeave(p.sid);
       });
 
       // Handle remote tracks being published
-      _room.on(RoomEvent.TrackSubscribed, (track, pub, p) => {
-        console.log('[lk] track subscribed:', track.kind, 'from:', p.identity);
-        const stream = new MediaStream([track.mediaStreamTrack]);
-        if (_onPeerStream) _onPeerStream(stream, p.sid);
+      _room.on('trackSubscribed', (track, pub, p) => {
+        console.log('[lk] track subscribed:', track?.kind, 'from:', p?.identity);
+        try {
+          const mediaTrack = track?.mediaStreamTrack || track;
+          if (mediaTrack) {
+            const stream = new MediaStream([mediaTrack]);
+            if (_onPeerStream) _onPeerStream(stream, p.sid);
+          }
+        } catch (e) { console.warn('[lk] track sub error:', e.message); }
       });
 
-      _room.on(RoomEvent.TrackUnsubscribed, (track, pub, p) => {
+      _room.on('trackUnsubscribed', (track, pub, p) => {
         console.log('[lk] track unsubscribed from:', p.identity);
         if (_onPeerLeave) _onPeerLeave(p.sid);
       });
@@ -179,7 +189,7 @@ const LK = (function () {
       
       // Set up data handler if room exists
       if (_room) {
-        _room.on(window._lkRoomEvent?.DataReceived || 'data-received', (payload, participant, kind, topic) => {
+        _room.on('dataReceived', (payload, participant, kind, topic) => {
           try {
             const msg = JSON.parse(new TextDecoder().decode(payload));
             const handler = _handlers[msg.kind];
@@ -200,7 +210,7 @@ const LK = (function () {
       if (_room && _room._dataHandlerSet) return;
       if (_room) {
         _room._dataHandlerSet = true;
-        _room.on(window._lkRoomEvent?.DataReceived || 'data-received', (payload, participant) => {
+        _room.on('dataReceived', (payload, participant) => {
           try {
             const msg = JSON.parse(new TextDecoder().decode(payload));
             const handler = _handlers[msg.kind];
