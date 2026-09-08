@@ -887,17 +887,18 @@ function showIncomingCall(callerName, peerId) {
     if (state._sendRingAccept) state._sendRingAccept({}, peerId);
     toast('Подключение к звонку…', 'info');
     try {
-      // Try to get camera/mic, but DON'T let it block the call
+      // Turn on camera BEFORE answering — tracks must be on PC before createAnswer
+      toast('Включение камеры…', 'info');
       try {
         await ensureLocalMedia(true).catch(async () => ensureLocalMedia(false));
       } catch (e) {
         console.warn('[APP] camera/mic failed, continuing without:', e.message);
       }
+      // MUST set localStream before acceptCall so tracks are in the answer
       if (state.localStream) {
         FB.setLocalStream(state.localStream);
+        console.log('[APP] localStream set before accept: ' + state.localStream.getTracks().length + ' tracks');
       }
-      // MUST call acceptCall even without local media — the caller's
-      // video will still come through via ontrack
       console.log('[APP] calling FB.acceptCall for', peerId?.slice(0, 12));
       await FB.acceptCall(peerId);
       toast('Видео подключено ✓', 'ok');
@@ -1042,15 +1043,19 @@ async function startCall() {
     return toast('В комнате нет других участников. Убедитесь, что оба выбрали одну комнату.', 'warn');
   }
 
-  // No separate ring signal — the offer itself triggers the incoming call dialog
-  // on the other side (handled in fb-signaling.js _processSignal)
-
-  await ensureLocalMedia(true).catch(async (e) => {
-    toast(`${e.message} Пробую только микрофон.`, 'warn');
-    return ensureLocalMedia(false);
-  }).catch(() => {});
-  if (!state.localStream) {
-    toast('Нет камеры/микрофона. Попытка звонка без медиа…', 'warn');
+  // Auto-turn on camera and mic BEFORE calling
+  // This ensures tracks are on the PC when the offer is created
+  if (!state.localStream || !hasVideoTrack(state.localStream)) {
+    toast('Включение камеры…', 'info');
+    await ensureLocalMedia(true).catch(async (e) => {
+      toast(`${e.message} Пробую только микрофон.`, 'warn');
+      return ensureLocalMedia(false);
+    }).catch(() => {});
+  }
+  // Set the local stream in FB signaling so tracks are added to PC
+  if (state.localStream) {
+    FB.setLocalStream(state.localStream);
+    console.log('[APP] localStream set before call: ' + state.localStream.getTracks().length + ' tracks');
   }
 
   // Send our stream to each peer via FB signaling
@@ -1059,7 +1064,6 @@ async function startCall() {
     if (_stopStreams.has(peerId)) continue;
     state._callingPeer = peerId;
     try {
-      if (state.localStream) FB.setLocalStream(state.localStream);
       await FB.startCall(peerId);
       _stopStreams.set(peerId, () => FB.stopStream(peerId));
       initiated++;
