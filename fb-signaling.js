@@ -10,16 +10,24 @@
 
 const FB = (function () {
   const DB_URL = 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app';
-  const ICE_SERVERS = [
-    // STUN
-    { urls: 'stun:stun.relay.metered.ca:80' },
+  // STUN-only servers (no TURN — tried first, free, zero bandwidth)
+  const STUN_ONLY = [
     { urls: 'stun:stun.l.google.com:19302' },
-    // Metered TURN (working, with credentials)
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+  ];
+  // TURN servers (Metered — used only as last resort when STUN fails)
+  const TURN_SERVERS = [
     { urls: 'turn:global.relay.metered.ca:80', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
     { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
     { urls: 'turn:global.relay.metered.ca:443', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
     { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
   ];
+  // Combined (STUN + TURN) — used when STUN-only fails
+  const ICE_SERVERS = [...STUN_ONLY, ...TURN_SERVERS];
 
   let _selfId = null;
   let _roomId = null;
@@ -94,8 +102,13 @@ const FB = (function () {
 
     pc.oniceconnectionstatechange = () => {
       console.log('[fb] ICE state:', pc.iceConnectionState, 'for', remotePeerId.slice(0, 12));
-      console.log('[fb] ICE candidates:', pc.localDescription?.sdp?.match(/a=candidate.*/g)?.length || 0, 'local');
       pc._lastIceCheck = Date.now();
+      // Clear upgrade timer if connected
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        if (pc._upgradeTimer) { clearTimeout(pc._upgradeTimer); pc._upgradeTimer = null; }
+        pc._iceFailCount = 0;
+        console.log('[fb] ICE connected!' + (pc._turnUpgraded ? ' (via TURN)' : ' (direct/STUN)'));
+      }
       if (pc.iceConnectionState === 'failed') {
         pc._iceFailCount++;
         if (pc._iceFailCount <= 2) {

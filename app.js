@@ -41,12 +41,12 @@ const PEERJS_KEY = undefined; // use free public PeerJS broker
 const PEER_ID_PREFIX = 'iac-call-v1-';
 const ROOM_PEER_ID = (code) => `${PEER_ID_PREFIX}room-${code.toLowerCase()}`;
 const ICE_SERVERS = [
-  { urls: 'stun:stun.relay.metered.ca:80' },
   { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:global.stun.twilio.com:3478' },
   { urls: 'turn:global.relay.metered.ca:80', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
-  { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
   { urls: 'turn:global.relay.metered.ca:443', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
-  { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
 ];
 
 /* ---------- IndexedDB shim removed — all media now lives in GitHub repo ---------- */
