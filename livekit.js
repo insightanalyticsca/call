@@ -158,14 +158,19 @@ const LK = (function () {
 
       console.log('[lk] connected to room:', roomId, 'as:', participantName);
 
-      // Enable camera and mic
-      try {
-        await _room.localParticipant.setCameraEnabled(true);
-        await _room.localParticipant.setMicrophoneEnabled(true);
-        console.log('[lk] camera + mic enabled');
-      } catch (e) {
-        console.warn('[lk] camera/mic failed:', e.message);
-      }
+      // NOTE: We do NOT call setCameraEnabled / setMicrophoneEnabled here.
+      // The caller (app.js joinPeerRoom) is responsible for calling
+      // ensureLocalMedia(true) to capture the camera ONCE, then
+      // LK.publishLocalStream(state.localStream) to publish those tracks.
+      //
+      // Why: on iOS Safari and many Android browsers the camera is a
+      // single-tenant resource. If LiveKit's setCameraEnabled captures the
+      // camera and we then call getUserMedia again for the local preview,
+      // one of the captures fails silently — and LiveKit's published track
+      // ends up dead. The remote participant sees a black square.
+      //
+      // By publishing our own MediaStreamTrack via publishTrack(), LiveKit
+      // uses the SAME source as the local preview. No double capture.
 
       // Backup manual scan for existing participants — catches any edge cases
       // where the SDK already had tracks subscribed before we registered handlers
@@ -198,6 +203,74 @@ const LK = (function () {
       return _localParticipant?.sid;
     },
 
+    // Publish tracks from an existing MediaStream to the LiveKit room.
+    // This is the SINGLE source of truth for local camera/mic — no
+    // double getUserMedia, no camera conflict on mobile.
+    // Idempotent: re-publishing the same track is a no-op.
+    async publishLocalStream(stream) {
+      if (!_room || !_localParticipant) {
+        console.warn('[lk] publishLocalStream: no room/localParticipant');
+        return;
+      }
+      if (!stream) {
+        console.warn('[lk] publishLocalStream: no stream');
+        return;
+      }
+
+      // Track which MediaStreamTracks we've already published (by track.id)
+      // so re-calling this is safe.
+      if (!_localParticipant._lkPublishedTracks) {
+        _localParticipant._lkPublishedTracks = new Set();
+      }
+      const published = _localParticipant._lkPublishedTracks;
+
+      for (const track of stream.getTracks()) {
+        if (published.has(track.id)) continue;
+        try {
+          const opts = track.kind === 'video'
+            ? {
+                // HD video encoding
+                videoCodec: 'vp8',
+                videoEncoding: {
+                  maxBitrate: 2_500_000,    // 2.5 Mbps — good for 1080p
+                  maxFramerate: 30,
+                  priority: 'high',
+                },
+                simulcast: false,           // 1:1 calls don't need simulcast
+                dynacast: true,             // adapt bitrate to subscriber
+              }
+            : track.kind === 'audio'
+              ? {
+                  audioCodec: 'opus',
+                  audioEncoding: {
+                    maxBitrate: 32_000,     // 32 kbps opus voice
+                  },
+                  dtx: true,
+                }
+              : undefined;
+
+          const pub = await _localParticipant.publishTrack(track, opts);
+          published.add(track.id);
+          console.log('[lk] published', track.kind, 'track:', pub?.trackSid || track.id);
+        } catch (e) {
+          console.warn('[lk] publish', track.kind, 'failed:', e.message);
+        }
+      }
+    },
+
+    // Unpublish all tracks we previously published. Called on hangup.
+    async unpublishAll() {
+      if (!_localParticipant) return;
+      const published = _localParticipant._lkPublishedTracks;
+      if (!published) return;
+      for (const pub of _localParticipant.trackPublications.values()) {
+        try {
+          if (pub.track) await _localParticipant.unpublishTrack(pub.track);
+        } catch (e) { console.warn('[lk] unpublish failed:', e.message); }
+      }
+      published.clear();
+    },
+
     async leave() {
       if (_room) {
         try { await _room.disconnect(); } catch {}
@@ -209,8 +282,11 @@ const LK = (function () {
     },
 
     setLocalStream(stream) {
-      // LiveKit manages local tracks internally via setCameraEnabled/setMicrophoneEnabled
-      // This is a no-op for compatibility
+      // Backwards-compat: when app.js calls setLocalStream, publish the tracks.
+      // This is async but we don't wait — caller doesn't expect a promise here.
+      this.publishLocalStream(stream).catch((e) => {
+        console.warn('[lk] setLocalStream publish failed:', e.message);
+      });
     },
 
     async startCall(peerId) {

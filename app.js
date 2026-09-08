@@ -759,7 +759,8 @@ async function joinPeerRoom(room) {
 
   setStatus($('#socketStatus'), 'Подключение к LiveKit…', 'warn');
 
-  // Join LiveKit room — handles signaling, media relay, everything
+  // Join LiveKit room — handles signaling, media relay, everything.
+  // LiveKit no longer captures the camera itself (see livekit.js publishLocalStream).
   await LK.joinRoom(room.code, {
     displayName: state.user.displayName || state.user.username,
     username: state.user.username
@@ -829,6 +830,17 @@ async function joinPeerRoom(room) {
 
   setStatus($('#socketStatus'), 'LiveKit: подключён ✓', 'ok');
   updateConnectionIndicator();
+
+  // Capture camera + mic ONCE and publish to LiveKit.
+  // This is the SINGLE source of truth for local media — no double getUserMedia.
+  // We try video+audio first, fall back to audio-only if camera fails.
+  try {
+    await ensureLocalMedia(true);
+  } catch (e) {
+    console.warn('[joinPeerRoom] ensureLocalMedia(video) failed:', e.message);
+    try { await ensureLocalMedia(false); } catch (e2) { console.warn('[joinPeerRoom] audio-only failed too:', e2.message); }
+  }
+  // ensureLocalMedia already calls publishLocalStream if state._room exists.
 
   sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
 
@@ -929,6 +941,7 @@ function trysteroBroadcast(obj) {
 }
 
 async function disconnectPeer() {
+  try { await LK.unpublishAll(); } catch (e) { console.warn('[disconnectPeer] unpublishAll:', e.message); }
   await LK.leave();
   _peerNames.clear();
   for (const stop of _stopStreams.values()) { try { stop(); } catch {} }
@@ -1002,20 +1015,33 @@ async function ensureLocalMedia(video = true) {
   if (state.localStream && (!video || hasVideoTrack(state.localStream))) {
     attachLocalStream(state.localStream);
     updateMediaControls();
+    // Re-publish in case new tracks were added (e.g. video re-enabled after audio-only)
+    if (state._room && state._room.publishLocalStream) {
+      try { await state._room.publishLocalStream(state.localStream); } catch (e) { console.warn('[APP] republish failed:', e.message); }
+    }
     return state.localStream;
   }
   if (state.localStream && video && !hasVideoTrack(state.localStream)) {
+    // Stop old tracks then re-capture with video
     state.localStream.getTracks().forEach((t) => t.stop());
     state.localStream = null;
   }
+  // HD capture: 1080p ideal, fall back to 720p, then to whatever the device supports.
   const constraints = video
-    ? { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: 1.777 }, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }
+    ? { video: { facingMode: 'user', width: { ideal: 1920, min: 640 }, height: { ideal: 1080, min: 480 }, frameRate: { ideal: 30, max: 30 } }, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }
     : { video: false, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
   try {
     state.localStream = await getUserMediaCompat(constraints);
   } catch (e) {
-    if (video && e?.name === 'OverconstrainedError') {
-      state.localStream = await getUserMediaCompat({ video: true, audio: true });
+    // Try 720p fallback
+    if (video && (e?.name === 'OverconstrainedError' || e?.name === 'NotReadableError')) {
+      console.warn('[ensureLocalMedia] 1080p failed, trying 720p:', e.message);
+      try {
+        state.localStream = await getUserMediaCompat({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      } catch (e2) {
+        // Last resort: any video + audio
+        state.localStream = await getUserMediaCompat({ video: true, audio: true });
+      }
     } else {
       throw new Error(normalizeMediaError(e, video));
     }
@@ -1023,6 +1049,10 @@ async function ensureLocalMedia(video = true) {
   state.camOff = false; state.micMuted = false;
   attachLocalStream(state.localStream);
   updateMediaControls();
+  // Publish tracks to LiveKit if we're in a room
+  if (state._room && state._room.publishLocalStream) {
+    try { await state._room.publishLocalStream(state.localStream); } catch (e) { console.warn('[APP] publish failed:', e.message); }
+  }
   toast(video ? 'Камера включена.' : 'Микрофон включён.', 'ok');
   return state.localStream;
 }
@@ -1045,19 +1075,17 @@ async function startCall() {
     return toast('В комнате нет других участников. Убедитесь, что оба выбрали одну комнату.', 'warn');
   }
 
-  // Auto-turn on camera and mic BEFORE calling
-  // This ensures tracks are on the PC when the offer is created
+  // Auto-turn on camera and mic BEFORE calling.
+  // ensureLocalMedia already publishes to LiveKit via publishLocalStream().
   if (!state.localStream || !hasVideoTrack(state.localStream)) {
     toast('Включение камеры…', 'info');
     await ensureLocalMedia(true).catch(async (e) => {
       toast(`${e.message} Пробую только микрофон.`, 'warn');
       return ensureLocalMedia(false);
     }).catch(() => {});
-  }
-  // Set the local stream in FB signaling so tracks are added to PC
-  if (state.localStream) {
-    FB.setLocalStream(state.localStream);
-    console.log('[APP] localStream set before call: ' + state.localStream.getTracks().length + ' tracks');
+  } else if (state._room && state._room.publishLocalStream) {
+    // Already have a stream — make sure it's published (idempotent)
+    try { await state._room.publishLocalStream(state.localStream); } catch (e) { console.warn('[startCall] publish failed:', e.message); }
   }
 
   // With LiveKit, we're already publishing tracks.
@@ -1230,6 +1258,7 @@ function setRecordMode(mode) {
   // Update the visible button states
   $('#modeAudioBtn')?.classList.toggle('active', mode === 'audio');
   $('#modeVideoBtn')?.classList.toggle('active', mode === 'video');
+  $('#modeCallBtn')?.classList.toggle('active', mode === 'call');
   updateMailGuide();
 }
 
@@ -1245,7 +1274,7 @@ function updateMailGuide() {
   const mode = modeInput ? modeInput.value : 'audio';
 
   // Clear all button highlights
-  ['#modeAudioBtn', '#modeVideoBtn', '#startRecordBtn', '#stopRecordBtn'].forEach((sel) => {
+  ['#modeAudioBtn', '#modeVideoBtn', '#modeCallBtn', '#startRecordBtn', '#stopRecordBtn'].forEach((sel) => {
     $(sel)?.classList.remove('guide-highlight');
   });
 
@@ -1267,9 +1296,15 @@ function updateMailGuide() {
   if (mode === 'audio') {
     narration = 'Аудио режим. Нажмите «Записать» ↓';
     highlightBtn = '#startRecordBtn';
-  } else {
+  } else if (mode === 'video') {
     narration = 'Видео режим. Нажмите «Записать» ↓';
     highlightBtn = '#startRecordBtn';
+  } else if (mode === 'call') {
+    const hasCall = (state.remoteStreams && state.remoteStreams.size > 0);
+    narration = hasCall
+      ? 'Запись звонка. Будет записано удалённое видео + звук. Нажмите «Записать» ↓'
+      : 'Нет активного звонка. Сначала позвоните, затем выберите этот режим.';
+    highlightBtn = hasCall ? '#startRecordBtn' : '';
   }
 
   const stepsHTML = steps.map((s, i) => {
@@ -1300,21 +1335,46 @@ async function startRecording() {
     if (!window.MediaRecorder) throw new Error('Этот браузер не поддерживает MediaRecorder.');
 
     // ----------------------------------------------------------------
-    // v7 fix: reusing the active call stream prevents the "no video
-    // after stop recording" bug. On iOS Safari and many Android Chrome
-    // versions the camera is a single-tenant resource — calling
-    // getUserMedia a second time for the same camera, then stopping
-    // those tracks in recorder.onstop, releases the underlying camera
-    // and kills the call's video track as well.
+    // v8: three recording modes.
+    //   audio — local mic only
+    //   video — local camera + mic
+    //   call  — REMOTE video + audio from the active LiveKit call
     //
-    // Strategy: clone the tracks from state.localStream when available.
-    // Cloned tracks share the same source but stopping a clone does NOT
-    // stop the original — the call's video stays alive.
+    // For audio/video we reuse state.localStream (cloned tracks) when
+    // available so we don't trigger a second getUserMedia (which kills
+    // the call's video on mobile single-tenant cameras).
+    // For 'call' mode we use the remote stream from state.remoteStreams.
     // ----------------------------------------------------------------
     let stream = null;
     let reusedCallStream = false;
+    let recordKind = mode; // 'audio' | 'video' | 'video' (call is recorded as video)
 
-    if (state.localStream) {
+    if (mode === 'call') {
+      // Record the remote call — combine all remote streams into one
+      const remoteStreams = Array.from(state.remoteStreams.values());
+      if (remoteStreams.length === 0) {
+        return toast('Нет активного звонка для записи. Сначала позвоните кому-нибудь.', 'warn');
+      }
+      stream = new MediaStream();
+      // Pick the FIRST video track (typical 1:1 call) and ALL audio tracks
+      let gotVideo = false;
+      for (const rs of remoteStreams) {
+        for (const t of rs.getTracks()) {
+          if (t.kind === 'video' && !gotVideo) {
+            stream.addTrack(t.clone());
+            gotVideo = true;
+          } else if (t.kind === 'audio') {
+            stream.addTrack(t.clone());
+          }
+        }
+      }
+      if (!stream.getTracks().length) {
+        return toast('Удалённый поток пуст. Попробуйте ещё раз.', 'warn');
+      }
+      reusedCallStream = true;
+      recordKind = gotVideo ? 'video' : 'audio';
+      console.log(`[recording] call mode: ${stream.getTracks().length} tracks (video: ${gotVideo})`);
+    } else if (state.localStream) {
       const hasVid = hasVideoTrack(state.localStream);
       const hasAud = hasAudioTrack(state.localStream);
       const needVid = (mode === 'video');
@@ -1333,16 +1393,18 @@ async function startRecording() {
     if (!stream) {
       toast(`Запрос доступа к ${mode === 'video' ? 'камере и микрофону' : 'микрофону'}…`, 'info');
       stream = await getUserMediaCompat(mode === 'video'
-        ? { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: 1.777 }, audio: true }
+        ? { video: { facingMode: 'user', width: { ideal: 1920, min: 640 }, height: { ideal: 1080, min: 480 }, frameRate: { ideal: 30 } }, audio: true }
         : { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
     }
 
     state.recordChunks = [];
-    const mime = mode === 'video' ? pickMime(['video/webm;codecs=vp9,opus', 'video/webm', 'video/mp4']) : pickMime(['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']);
+    const mime = (recordKind === 'video')
+      ? pickMime(['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'])
+      : pickMime(['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']);
     state.recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
     state.recorder.ondataavailable = (e) => { if (e.data && e.data.size) state.recordChunks.push(e.data); };
     state.recorder.onstop = async () => {
-      const blob = new Blob(state.recordChunks, { type: state.recorder.mimeType || (mode === 'video' ? 'video/webm' : 'audio/webm') });
+      const blob = new Blob(state.recordChunks, { type: state.recorder.mimeType || (recordKind === 'video' ? 'video/webm' : 'audio/webm') });
       // Stop the recording stream's tracks.
       // If we reused call stream tracks, these are CLONES — stopping them
       // is safe and does NOT affect the call's video.
@@ -1350,7 +1412,7 @@ async function startRecording() {
       const note = $('#mailNote').value.trim();
       const name = `${mode}-mail-${Date.now()}.webm`;
       toast('Сохранение в GitHub…', 'info');
-      await saveMediaBlob(blob, 'mail', note, name, mode);
+      await saveMediaBlob(blob, 'mail', note, name, recordKind);
       $('#recordPreview').srcObject = null;
       $('#recordPreview').classList.add('hidden');
       $('#mailEmpty')?.classList.remove('hidden');
@@ -1364,7 +1426,7 @@ async function startRecording() {
     $('#startRecordBtn').disabled = true;
     $('#stopRecordBtn').disabled = false;
     // Show live preview during recording
-    if (mode === 'video') {
+    if (recordKind === 'video') {
       $('#mailEmpty')?.classList.add('hidden');
       $('#recordPreview').classList.remove('hidden');
       $('#recordPreview').srcObject = stream;
@@ -1374,7 +1436,8 @@ async function startRecording() {
       $('#mailEmpty')?.classList.remove('hidden');
     }
     updateMailGuide();
-    toast(`Запись начата (${mode === 'video' ? 'видео' : 'аудио'})${reusedCallStream ? ' (звонок активен)' : ''} ✓`, 'ok');
+    const modeLabel = mode === 'call' ? 'звонок' : (recordKind === 'video' ? 'видео' : 'аудио');
+    toast(`Запись начата (${modeLabel})${reusedCallStream ? ' (звонок активен)' : ''} ✓`, 'ok');
     startRecordTimer();
   } catch (e) {
     console.error('[recording] error', e);
@@ -2406,6 +2469,7 @@ function bind() {
   bindClick('#stopRecordBtn', stopRecording);
   bindClick('#modeAudioBtn', () => { setRecordMode('audio'); toast('Аудио режим', 'info'); });
   bindClick('#modeVideoBtn', () => { setRecordMode('video'); toast('Видео режим', 'info'); });
+  bindClick('#modeCallBtn', () => { setRecordMode('call'); toast('Режим: запись звонка (удалённое видео)', 'info'); });
   initIconTooltips();
   bindClick('#refreshMailBtn', refreshMail);
   bindClick('#uploadFilesBtn', uploadFiles);
