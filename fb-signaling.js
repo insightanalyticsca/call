@@ -231,9 +231,19 @@ const FB = (function () {
 
     if (signalType === 'answer') {
       if (peer.pc) {
-        console.log('[fb] received answer from', fromPeerId.slice(0, 12));
-        try { await peer.pc.setRemoteDescription(JSON.parse(signalData.sdp)); }
+        const answerSdp = JSON.parse(signalData.sdp);
+        const ansHasAudio = answerSdp.sdp.includes('m=audio');
+        const ansHasVideo = answerSdp.sdp.includes('m=video');
+        console.log('[fb] received answer from', fromPeerId.slice(0, 12), 
+          'audio=' + ansHasAudio, 'video=' + ansHasVideo,
+          'pcState=' + peer.pc.signalingState);
+        try { 
+          await peer.pc.setRemoteDescription(answerSdp);
+          console.log('[fb] setRemoteDescription OK — receivers=' + peer.pc.getReceivers().length);
+        }
         catch(e) { console.warn('[fb] setRemoteDescription(answer) failed', e); }
+      } else {
+        console.warn('[fb] received answer but no PC for', fromPeerId.slice(0, 12));
       }
       await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/answer`);
     } else if (signalType === 'hangup') {

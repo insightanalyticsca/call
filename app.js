@@ -786,18 +786,9 @@ async function joinPeerRoom(room) {
     $('#pcState').textContent = `PC: connected (${state.remoteStreams.size})`;
     $('#iceState').textContent = `ICE: connected`;
     updateConnectionIndicator();
-    // Auto-enter fullscreen when remote video first appears
+    // Don't auto-fullscreen — requires user gesture. Just show toast.
     if (state.remoteStreams.size === 1) {
-      const stage = $('#callStage');
-      const video = $('#remoteVideo');
-      if (stage) {
-        let entered = false;
-        if (stage.requestFullscreen) { try { await stage.requestFullscreen(); entered = true; } catch {} }
-        if (!entered && stage.webkitRequestFullscreen) { try { stage.webkitRequestFullscreen(); entered = true; } catch {} }
-        if (!entered && video?.webkitEnterFullscreen) { try { video.webkitEnterFullscreen(); entered = true; } catch {} }
-        if (!entered) { stage.classList.add('ui-hidden'); window.scrollTo(0, 0); }
-      }
-      toast('Видео подключено ✓', 'ok');
+      toast('Видео подключено ✓ Нажмите «Экран» для полного экрана', 'ok');
     }
   };
 
