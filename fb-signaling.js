@@ -170,26 +170,31 @@ const FB = (function () {
       }
     }
 
-    if (!peer.pc) peer.pc = _createPC(fromPeerId);
+    // Always create a FRESH PC for this call
+    if (peer.pc) { try { peer.pc.close(); } catch {} }
+    peer.pc = _createPC(fromPeerId);
 
-    // Ensure our local tracks are on the PC
+    // CRITICAL: add local tracks BEFORE setRemoteDescription + createAnswer
+    // Without tracks, the answer has no media lines and caller's ontrack never fires
     if (_localStream) {
-      const senders = peer.pc.getSenders();
       _localStream.getTracks().forEach(t => {
-        const existing = senders.find(s => s.track && s.track.kind === t.kind);
-        if (!existing) {
-          peer.pc.addTrack(t, _localStream);
-          console.log('[fb] added local track before answering');
-        }
+        peer.pc.addTrack(t, _localStream);
+        console.log('[fb] added local track before answering:', t.kind);
       });
+    } else {
+      console.warn('[fb] no localStream when answering — answer will have no media');
     }
 
     console.log('[fb] processing offer from', fromPeerId.slice(0, 12));
     await peer.pc.setRemoteDescription(offer);
     const answer = await peer.pc.createAnswer();
     await peer.pc.setLocalDescription(answer);
+    // Log whether answer has media lines
+    const hasAudio = answer.sdp.includes('m=audio');
+    const hasVideo = answer.sdp.includes('m=video');
+    console.log('[fb] answer created: audio=' + hasAudio + ' video=' + hasVideo + ' senders=' + peer.pc.getSenders().length);
     await _sendSignal(fromPeerId, { type: 'answer', sdp: JSON.stringify(answer), from: _selfId });
-    console.log('[fb] answer sent to', fromPeerId.slice(0, 12), 'senders=' + peer.pc.getSenders().length);
+    console.log('[fb] answer sent to', fromPeerId.slice(0, 12));
     await _fbDelete(`/rooms/${_roomId}/signals/${_selfId}/${fromPeerId}/offer`);
   }
 
@@ -465,12 +470,34 @@ const FB = (function () {
         peer = { pc: null, displayName: 'Гость', makingOffer: false };
         _peers.set(peerId, peer);
       }
-      if (!peer.pc) peer.pc = _createPC(peerId);
+      // Always create a FRESH PC (close old one if exists)
+      if (peer.pc) { try { peer.pc.close(); } catch {} }
+      peer.pc = _createPC(peerId);
+      
+      // CRITICAL: ensure local tracks are on the PC BEFORE creating offer
+      // Without tracks, the offer has no media lines and ontrack never fires
+      if (_localStream) {
+        const senders = peer.pc.getSenders();
+        _localStream.getTracks().forEach(t => {
+          const existing = senders.find(s => s.track && s.track.kind === t.kind);
+          if (!existing) {
+            peer.pc.addTrack(t, _localStream);
+            console.log('[fb] added local track to PC before offer:', t.kind);
+          }
+        });
+      } else {
+        console.warn('[fb] no localStream when starting call — offer will have no media');
+      }
+      
       if (peer.pc.signalingState !== 'stable') return;
       peer.makingOffer = true;
       try {
         const offer = await peer.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await peer.pc.setLocalDescription(offer);
+        // Log whether offer has media lines
+        const hasAudio = offer.sdp.includes('m=audio');
+        const hasVideo = offer.sdp.includes('m=video');
+        console.log('[fb] offer created: audio=' + hasAudio + ' video=' + hasVideo + ' senders=' + peer.pc.getSenders().length);
         await _sendSignal(peerId, { type: 'offer', sdp: JSON.stringify(offer), from: _selfId, displayName: _displayName });
         console.log('[fb] offer sent to', peerId.slice(0, 12));
       } catch (e) { console.warn('[fb] offer failed', e); }
