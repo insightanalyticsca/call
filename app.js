@@ -41,20 +41,12 @@ const PEERJS_KEY = undefined; // use free public PeerJS broker
 const PEER_ID_PREFIX = 'iac-call-v1-';
 const ROOM_PEER_ID = (code) => `${PEER_ID_PREFIX}room-${code.toLowerCase()}`;
 const ICE_SERVERS = [
+  { urls: 'stun:stun.relay.metered.ca:80' },
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
-  { urls: 'stun:global.stun.twilio.com:3478' },
-  { urls: 'stun:stun.nextcloud.com:443' },
-  { urls: 'stun:stun.sipgate.net:3478' },
-  { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', credential: 'webrtc', username: 'webrtc' },
-  { urls: 'turn:turn.anyfirewall.com:443', credential: 'webrtc', username: 'webrtc' },
-  { urls: 'turn:numb.viagenie.ca:3478', credential: 'webrtc', username: 'webrtc@live.com' },
-  { urls: 'turn:numb.viagenie.ca:443?transport=tcp', credential: 'webrtc', username: 'webrtc@live.com' },
-  { urls: 'turn:turn.bistri.com:80', credential: 'homeo', username: 'homeo' },
-  { urls: 'turn:turn.bistri.com:443?transport=tcp', credential: 'homeo', username: 'homeo' },
+  { urls: 'turn:global.relay.metered.ca:80', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
+  { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
+  { urls: 'turn:global.relay.metered.ca:443', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
+  { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
 ];
 
 /* ---------- IndexedDB shim removed — all media now lives in GitHub repo ---------- */

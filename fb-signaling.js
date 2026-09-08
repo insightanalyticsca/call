@@ -11,22 +11,14 @@
 const FB = (function () {
   const DB_URL = 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app';
   const ICE_SERVERS = [
-    // STUN servers
+    // STUN
+    { urls: 'stun:stun.relay.metered.ca:80' },
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: 'stun:stun.nextcloud.com:443' },
-    { urls: 'stun:stun.sipgate.net:3478' },
-    // TURN servers — multiple providers for redundancy
-    { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', credential: 'webrtc', username: 'webrtc' },
-    { urls: 'turn:turn.anyfirewall.com:443', credential: 'webrtc', username: 'webrtc' },
-    { urls: 'turn:numb.viagenie.ca:3478', credential: 'webrtc', username: 'webrtc@live.com' },
-    { urls: 'turn:numb.viagenie.ca:443?transport=tcp', credential: 'webrtc', username: 'webrtc@live.com' },
-    { urls: 'turn:turn.bistri.com:80', credential: 'homeo', username: 'homeo' },
-    { urls: 'turn:turn.bistri.com:443?transport=tcp', credential: 'homeo', username: 'homeo' },
+    // Metered TURN (working, with credentials)
+    { urls: 'turn:global.relay.metered.ca:80', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
+    { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
+    { urls: 'turn:global.relay.metered.ca:443', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
+    { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'b726935ca3b6889e1570d25b', credential: '3onGED6BKzsBVZch' },
   ];
 
   let _selfId = null;
