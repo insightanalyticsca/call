@@ -1,5 +1,5 @@
 /* Service worker for Семейная связь (static GitHub Pages edition) */
-const CACHE = 'call-static-lk3';
+const CACHE = 'call-static-lk4';
 
 self.addEventListener('install', (event) => {
   const base = self.registration ? self.registration.scope : './';
@@ -15,7 +15,6 @@ self.addEventListener('install', (event) => {
     caches.open(CACHE)
       .then((cache) => Promise.allSettled(assets.map((a) => cache.add(a))))
       .then(() => self.skipWaiting())
-  self.addEventListener("install", () => self.skipWaiting())
   );
 });
 

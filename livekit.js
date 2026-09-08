@@ -60,7 +60,12 @@ const LK = (function () {
 
     async joinRoom(roomId, userInfo) {
       // Load LiveKit SDK
-      const { Room, RoomEvent, TrackEvent } = await import('https://cdn.jsdelivr.net/npm/livekit-client@2/+esm');
+      const lk = await import('https://cdn.jsdelivr.net/npm/livekit-client@2/+esm');
+    const Room = lk.Room;
+    const RoomEvent = lk.RoomEvent;
+    const TrackEvent = lk.TrackEvent;
+    // Store globally for makeAction
+    window._lkRoomEvent = RoomEvent;
       
       // Leave existing room
       if (_room) { try { await _room.disconnect(); } catch {} }
@@ -174,7 +179,7 @@ const LK = (function () {
       
       // Set up data handler if room exists
       if (_room) {
-        _room.on(RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+        _room.on(window._lkRoomEvent?.DataReceived || 'data-received', (payload, participant, kind, topic) => {
           try {
             const msg = JSON.parse(new TextDecoder().decode(payload));
             const handler = _handlers[msg.kind];
@@ -195,7 +200,7 @@ const LK = (function () {
       if (_room && _room._dataHandlerSet) return;
       if (_room) {
         _room._dataHandlerSet = true;
-        _room.on(RoomEvent.DataReceived, (payload, participant) => {
+        _room.on(window._lkRoomEvent?.DataReceived || 'data-received', (payload, participant) => {
           try {
             const msg = JSON.parse(new TextDecoder().decode(payload));
             const handler = _handlers[msg.kind];
