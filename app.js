@@ -807,6 +807,16 @@ async function joinPeerRoom(room) {
     state.remoteStreams.delete(peerId);
     updateRemoteVideo();
     updateConnectionIndicator();
+    // lk11: remote hung up — stop our camera + unpublish too
+    try { LK.unpublishAll(); } catch (e) { console.warn('[onHangup] unpublish:', e.message); }
+    if (state.localStream) {
+      state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+      state.localStream = null;
+    }
+    attachLocalStream(null);
+    updateMediaControls();
+    state._callingPeer = null;
+    _setCallingState(false);
     toast('Собеседник завершил звонок.');
   });
 
@@ -821,11 +831,29 @@ async function joinPeerRoom(room) {
   onRingAccept((_data, peerId) => {
     toast('Звонок принят ✓', 'ok');
     state._callingPeer = null;
+    if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
+    _setCallingState(false);
+    // Callee accepted — NOW publish our tracks so they see us
+    if (state.localStream && state._room && state._room.publishLocalStream) {
+      state._room.publishLocalStream(state.localStream).catch((e) => {
+        console.warn('[onRingAccept] publish failed:', e.message);
+      });
+    }
   });
 
   onRingDecline((_data, peerId) => {
     toast('Звонок отклонён.', 'warn');
     state._callingPeer = null;
+    if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
+    _setCallingState(false);
+    // Callee declined — stop camera, unpublish
+    if (state.localStream) {
+      state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+      state.localStream = null;
+    }
+    attachLocalStream(null);
+    updateMediaControls();
+    try { LK.unpublishAll(); } catch (e) { console.warn('[onRingDecline] unpublish:', e.message); }
   });
 
   // --- Set peer event callbacks BEFORE joinRoom ---
@@ -885,13 +913,10 @@ async function joinPeerRoom(room) {
   setStatus($('#socketStatus'), 'LiveKit: подключён ✓', 'ok');
   updateConnectionIndicator();
 
-  // Capture camera + mic ONCE and publish to LiveKit.
-  try {
-    await ensureLocalMedia(true);
-  } catch (e) {
-    console.warn('[joinPeerRoom] ensureLocalMedia(video) failed:', e.message);
-    try { await ensureLocalMedia(false); } catch (e2) { console.warn('[joinPeerRoom] audio-only failed too:', e2.message); }
-  }
+  // NOTE (lk11): We do NOT capture/publish camera here.
+  // Room join = presence only. The camera turns on only when a call
+  // is initiated (startCall) or accepted (showIncomingCall accept).
+  // This gives the normal phone-call flow: ring → accept → video.
 
   sendHello({ displayName: state.user.displayName || state.user.username, username: state.user.username });
 }
@@ -917,14 +942,15 @@ function showIncomingCall(callerName, peerId) {
     if (state._sendRingAccept) state._sendRingAccept({}, peerId);
     toast('Подключение к звонку…', 'info');
     try {
-      // Turn on camera BEFORE answering — tracks must be on PC before createAnswer
+      // lk11: Capture camera + publish tracks to LiveKit.
+      // The caller receives ringAccept and publishes their tracks too.
+      // Both sides start publishing simultaneously → both see each other.
       toast('Включение камеры…', 'info');
       try {
         await ensureLocalMedia(true).catch(async () => ensureLocalMedia(false));
       } catch (e) {
         console.warn('[APP] camera/mic failed, continuing without:', e.message);
       }
-      // LiveKit handles tracks automatically — just accept
       toast('Видео подключено ✓', 'ok');
       updateCallGuide();
     } catch (e) {
@@ -1090,12 +1116,12 @@ function updateMediaControls() {
     }
   }
 }
-async function ensureLocalMedia(video = true) {
+async function ensureLocalMedia(video = true, publish = true) {
   if (state.localStream && (!video || hasVideoTrack(state.localStream))) {
     attachLocalStream(state.localStream);
     updateMediaControls();
     // Re-publish in case new tracks were added (e.g. video re-enabled after audio-only)
-    if (state._room && state._room.publishLocalStream) {
+    if (publish && state._room && state._room.publishLocalStream) {
       try { await state._room.publishLocalStream(state.localStream); } catch (e) { console.warn('[APP] republish failed:', e.message); }
     }
     return state.localStream;
@@ -1128,8 +1154,8 @@ async function ensureLocalMedia(video = true) {
   state.camOff = false; state.micMuted = false;
   attachLocalStream(state.localStream);
   updateMediaControls();
-  // Publish tracks to LiveKit if we're in a room
-  if (state._room && state._room.publishLocalStream) {
+  // Publish tracks to LiveKit if we're in a room AND publish is requested
+  if (publish && state._room && state._room.publishLocalStream) {
     try { await state._room.publishLocalStream(state.localStream); } catch (e) { console.warn('[APP] publish failed:', e.message); }
   }
   toast(video ? 'Камера включена.' : 'Микрофон включён.', 'ok');
@@ -1140,7 +1166,7 @@ async function startCall() {
   if (!state.currentRoom) return toast('Сначала выберите комнату.', 'warn');
   if (!state._room) return toast('Сигналинг не подключён.', 'bad');
 
-  // Wait for Trystero to discover peers (can take 5-10s after room join)
+  // Wait for peers to be discovered
   let peerIds = Object.keys(state._room.getPeers());
   if (peerIds.length === 0) {
     toast('Поиск участников в комнате…', 'info');
@@ -1154,32 +1180,59 @@ async function startCall() {
     return toast('В комнате нет других участников. Убедитесь, что оба выбрали одну комнату.', 'warn');
   }
 
-  // Auto-turn on camera and mic BEFORE calling.
-  // ensureLocalMedia already publishes to LiveKit via publishLocalStream().
+  // lk11: Capture camera for LOCAL PREVIEW only — do NOT publish yet.
+  // Tracks are published only when the callee accepts (onRingAccept).
+  // This gives the caller a self-preview while waiting, without
+  // sending video to the callee before they accept.
   if (!state.localStream || !hasVideoTrack(state.localStream)) {
     toast('Включение камеры…', 'info');
-    await ensureLocalMedia(true).catch(async (e) => {
+    await ensureLocalMedia(true, false).catch(async (e) => {
       toast(`${e.message} Пробую только микрофон.`, 'warn');
-      return ensureLocalMedia(false);
+      return ensureLocalMedia(false, false);
     }).catch(() => {});
-  } else if (state._room && state._room.publishLocalStream) {
-    // Already have a stream — make sure it's published (idempotent)
-    try { await state._room.publishLocalStream(state.localStream); } catch (e) { console.warn('[startCall] publish failed:', e.message); }
   }
+  // If we already have a stream from a previous call, unpublish it
+  // so we don't send video before the callee accepts.
+  try { await LK.unpublishAll(); } catch (e) { console.warn('[startCall] unpublish:', e.message); }
 
-  // With LiveKit, we're already publishing tracks.
-  // Just send ring notification to trigger incoming call dialog.
+  // Send ring notification — callee will show incoming call dialog
+  state._callingPeer = peerIds[0];
   if (state._sendRing) {
     state._sendRing({ displayName: state.user.displayName || state.user.username });
   }
 
-  // LiveKit handles media automatically — no offer/answer needed
-  let initiated = peerIds.length;
+  // Show "calling..." state on the call stage
+  _setCallingState(true);
+  toast(`Звонок отправлен. Ожидание ответа…`, 'ok');
 
-  if (initiated) {
-    toast(`Звонок отправлен (${initiated}). Ожидание ответа…`, 'ok');
+  // Auto-cancel after 60s if no answer
+  if (state._callTimeout) clearTimeout(state._callTimeout);
+  state._callTimeout = setTimeout(() => {
+    if (state._callingPeer) {
+      state._callingPeer = null;
+      _setCallingState(false);
+      // Stop camera since call wasn't answered
+      if (state.localStream) {
+        state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+        state.localStream = null;
+      }
+      attachLocalStream(null);
+      updateMediaControls();
+      toast('Нет ответа. Звонок отменён.', 'warn');
+    }
+  }, 60000);
+}
+
+// Show/hide the "calling..." overlay on the call stage
+function _setCallingState(calling) {
+  const subline = $('#callSubline');
+  if (calling) {
+    if (subline) subline.textContent = 'Звоню… ожидание ответа';
   } else {
-    toast('Не удалось позвонить.', 'bad');
+    const room = state.currentRoom;
+    if (subline && room) {
+      subline.textContent = `Комната ${room.code} готова. Откройте камеры и нажмите «Позвонить».`;
+    }
   }
 }
 
@@ -1195,6 +1248,17 @@ function hangup(notify = true) {
   state.remoteStreams.clear();
   $('#remoteVideo').srcObject = null;
   $('#callStage')?.classList.remove('ui-hidden');
+  // lk11: Unpublish tracks + stop camera on hangup (stay in room for presence)
+  try { LK.unpublishAll(); } catch (e) { console.warn('[hangup] unpublish:', e.message); }
+  if (state.localStream) {
+    state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+    state.localStream = null;
+  }
+  attachLocalStream(null);
+  updateMediaControls();
+  state._callingPeer = null;
+  if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
+  _setCallingState(false);
   setStatus($('#peerStatus'), 'WebRTC: нет соединения', 'warn');
   $('#pcState').textContent = 'PC: нет данных';
   $('#iceState').textContent = 'ICE: нет данных';
