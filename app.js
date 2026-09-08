@@ -1050,13 +1050,14 @@ async function startCall() {
     console.log('[APP] localStream set before call: ' + state.localStream.getTracks().length + ' tracks');
   }
 
-  // Send our stream to each peer via FB signaling
-  let initiated = 0;
-  for (const peerId of peerIds) {
-    if (_stopStreams.has(peerId)) continue;
-    state._callingPeer = peerId;
-    try {
+  // With LiveKit, we're already publishing tracks.
+  // Just send ring notification to trigger incoming call dialog.
+  if (state._sendRing) {
+    state._sendRing({ displayName: state.user.displayName || state.user.username });
   }
+
+  // LiveKit handles media automatically — no offer/answer needed
+  let initiated = peerIds.length;
 
   if (initiated) {
     toast(`Звонок отправлен (${initiated}). Ожидание ответа…`, 'ok');
