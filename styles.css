@@ -1177,3 +1177,6 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
 }
 .ptr-indicator .ptr-arrow.flip { transform: rotate(180deg); }
 @keyframes ptrSpin { to { transform: rotate(360deg); } }
+
+/* Hide placeholder when remote video is playing */
+.remote-stage.has-remote .remote-empty { display: none !important; }
