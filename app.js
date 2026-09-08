@@ -408,6 +408,7 @@ const state = {
   recordChunks: [],
   recordStartedAt: 0,
   recordTimerId: null,
+  _recordingCall: false,  // true while recording an active call (lk9)
   installPrompt: null,
   health: { ok: true, storageWritable: true, ffmpegAvailable: false, maxUploadMb: 2048 },
   pendingJoin: null
@@ -966,6 +967,7 @@ function updateRemoteVideo() {
   if (streams.length === 0) {
     $('#remoteVideo').srcObject = null;
     stage?.classList.remove('has-remote');
+    updateCallRecordButton();
     return;
   }
   stage?.classList.add('has-remote');
@@ -978,6 +980,75 @@ function updateRemoteVideo() {
     $('#remoteVideo').srcObject = mixed;
     $('#remoteVideo')?.play()?.catch(() => {});
   }
+  updateCallRecordButton();
+}
+
+/* ---------- Call-recording toggle (lk9) ----------
+ * The 'Запись' button is hidden by default and only appears when
+ * there's an active call (state.remoteStreams.size > 0). Clicking it
+ * starts recording the remote stream immediately (mode = 'call').
+ * Clicking again stops recording. There is NO persistent 'Звонок'
+ * mode button in the Почта tab anymore — recording a call is opt-in
+ * via this single button.
+ */
+function updateCallRecordButton() {
+  const btn = $('#recordCallBtn');
+  if (!btn) return;
+  const hasCall = state.remoteStreams && state.remoteStreams.size > 0;
+  const isRecording = !!(state.recorder && state.recorder.state === 'recording' && state._recordingCall);
+  if (hasCall || isRecording) {
+    btn.classList.remove('hidden');
+    btn.classList.toggle('recording', isRecording);
+    btn.innerHTML = isRecording
+      ? `${icon('square')}<span>Стоп</span>`
+      : `${icon('record-vinyl')}<span>Запись</span>`;
+  } else {
+    btn.classList.add('hidden');
+    btn.classList.remove('recording');
+  }
+}
+
+async function toggleCallRecording() {
+  // If we're recording a call right now -> stop
+  if (state.recorder && state.recorder.state === 'recording' && state._recordingCall) {
+    stopRecording();
+    return;
+  }
+  // Otherwise -> start call recording (mode = 'call')
+  if (state.remoteStreams.size === 0) {
+    return toast('Нет активного звонка. Сначала позвоните кому-нибудь.', 'warn');
+  }
+  setRecordMode('call');
+  await startRecording();
+  // Mark this as a call recording so updateCallRecordButton knows
+  if (state.recorder && state.recorder.state === 'recording') {
+    state._recordingCall = true;
+    _startCallRecIndicator();
+    updateCallRecordButton();
+  }
+}
+
+function _startCallRecIndicator() {
+  const ind = $('#callRecIndicator');
+  if (!ind) return;
+  ind.classList.remove('hidden');
+  const timerEl = $('#callRecTimer');
+  const startedAt = Date.now();
+  if (ind._timer) clearInterval(ind._timer);
+  ind._timer = setInterval(() => {
+    if (!timerEl) return;
+    const s = Math.floor((Date.now() - startedAt) / 1000);
+    timerEl.textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  }, 500);
+}
+
+function _stopCallRecIndicator() {
+  const ind = $('#callRecIndicator');
+  if (!ind) return;
+  ind.classList.add('hidden');
+  if (ind._timer) { clearInterval(ind._timer); ind._timer = null; }
+  const timerEl = $('#callRecTimer');
+  if (timerEl) timerEl.textContent = '00:00';
 }
 
 
@@ -1106,6 +1177,10 @@ async function startCall() {
 
 function hangup(notify = true) {
   if (notify) trysteroBroadcast({ kind: 'hangup' });
+  // Stop call recording if active
+  if (state._recordingCall) {
+    try { stopRecording(); } catch (e) { console.warn('[hangup] stopRecording:', e.message); }
+  }
   if (document.fullscreenElement) { document.exitFullscreen?.().catch(() => {}); }
   else if (document.webkitFullscreenElement) { document.webkitExitFullscreen?.(); }
   _stopStreams.clear();
@@ -1116,6 +1191,7 @@ function hangup(notify = true) {
   $('#pcState').textContent = 'PC: нет данных';
   $('#iceState').textContent = 'ICE: нет данных';
   updateConnectionIndicator();
+  updateCallRecordButton();
 }
 
 function resetCall() {
@@ -1274,11 +1350,16 @@ function updateMailGuide() {
   const mode = modeInput ? modeInput.value : 'audio';
 
   // Clear all button highlights
-  ['#modeAudioBtn', '#modeVideoBtn', '#modeCallBtn', '#startRecordBtn', '#stopRecordBtn'].forEach((sel) => {
+  ['#modeAudioBtn', '#modeVideoBtn', '#startRecordBtn', '#stopRecordBtn'].forEach((sel) => {
     $(sel)?.classList.remove('guide-highlight');
   });
 
   if (isRecording) {
+    // If this is a call recording, show a different message (no in-mail buttons to highlight)
+    if (state._recordingCall) {
+      guide.innerHTML = '<div class="guide-narration done">● Идёт запись звонка. Нажмите «Стоп» на экране звонка чтобы завершить.</div>';
+      return;
+    }
     guide.innerHTML = '<div class="guide-narration done">● Идёт запись… нажмите «Стоп» чтобы завершить</div>';
     $('#stopRecordBtn')?.classList.add('guide-highlight');
     return;
@@ -1450,6 +1531,12 @@ function stopRecording() {
   $('#stopRecordBtn').disabled = true;
   stopRecordTimer();
   updateMailGuide();
+  // Clear call-recording state and UI if this was a call recording
+  if (state._recordingCall) {
+    state._recordingCall = false;
+    _stopCallRecIndicator();
+    updateCallRecordButton();
+  }
 }
 
 /* ============================================================
@@ -2469,7 +2556,8 @@ function bind() {
   bindClick('#stopRecordBtn', stopRecording);
   bindClick('#modeAudioBtn', () => { setRecordMode('audio'); toast('Аудио режим', 'info'); });
   bindClick('#modeVideoBtn', () => { setRecordMode('video'); toast('Видео режим', 'info'); });
-  bindClick('#modeCallBtn', () => { setRecordMode('call'); toast('Режим: запись звонка (удалённое видео)', 'info'); });
+  // Call-recording toggle — only visible during an active call (see updateCallRecordButton)
+  bindClick('#recordCallBtn', toggleCallRecording);
   initIconTooltips();
   bindClick('#refreshMailBtn', refreshMail);
   bindClick('#uploadFilesBtn', uploadFiles);
