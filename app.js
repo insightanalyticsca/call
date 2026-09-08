@@ -47,11 +47,14 @@ const ICE_SERVERS = [
   { urls: 'stun:stun3.l.google.com:19302' },
   { urls: 'stun:stun4.l.google.com:19302' },
   { urls: 'stun:global.stun.twilio.com:3478' },
-  // TURN servers (relay for NAT traversal — required for mobile/cellular)
-  { urls: 'turn:turn.relay.metered.ca:80', username: 'free', credential: 'free' },
-  { urls: 'turn:turn.relay.metered.ca:443', username: 'free', credential: 'free' },
-  { urls: 'turn:turn.relay.metered.ca:443?transport=tcp', username: 'free', credential: 'free' },
+  { urls: 'stun:stun.nextcloud.com:443' },
+  { urls: 'stun:stun.sipgate.net:3478' },
   { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', credential: 'webrtc', username: 'webrtc' },
+  { urls: 'turn:turn.anyfirewall.com:443', credential: 'webrtc', username: 'webrtc' },
+  { urls: 'turn:numb.viagenie.ca:3478', credential: 'webrtc', username: 'webrtc@live.com' },
+  { urls: 'turn:numb.viagenie.ca:443?transport=tcp', credential: 'webrtc', username: 'webrtc@live.com' },
+  { urls: 'turn:turn.bistri.com:80', credential: 'homeo', username: 'homeo' },
+  { urls: 'turn:turn.bistri.com:443?transport=tcp', credential: 'homeo', username: 'homeo' },
 ];
 
 /* ---------- IndexedDB shim removed — all media now lives in GitHub repo ---------- */

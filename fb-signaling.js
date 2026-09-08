@@ -11,19 +11,22 @@
 const FB = (function () {
   const DB_URL = 'https://family-call-477c7-default-rtdb.asia-southeast1.firebasedatabase.app';
   const ICE_SERVERS = [
-    // STUN servers (for discovering public IP)
+    // STUN servers
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
-    // TURN servers (relay for NAT traversal — required for mobile/cellular)
-    // OpenRelay is down — using metered relay instead
-    { urls: 'turn:turn.relay.metered.ca:80', username: 'free', credential: 'free' },
-    { urls: 'turn:turn.relay.metered.ca:443', username: 'free', credential: 'free' },
-    { urls: 'turn:turn.relay.metered.ca:443?transport=tcp', username: 'free', credential: 'free' },
+    { urls: 'stun:stun.nextcloud.com:443' },
+    { urls: 'stun:stun.sipgate.net:3478' },
+    // TURN servers — multiple providers for redundancy
     { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', credential: 'webrtc', username: 'webrtc' },
+    { urls: 'turn:turn.anyfirewall.com:443', credential: 'webrtc', username: 'webrtc' },
+    { urls: 'turn:numb.viagenie.ca:3478', credential: 'webrtc', username: 'webrtc@live.com' },
+    { urls: 'turn:numb.viagenie.ca:443?transport=tcp', credential: 'webrtc', username: 'webrtc@live.com' },
+    { urls: 'turn:turn.bistri.com:80', credential: 'homeo', username: 'homeo' },
+    { urls: 'turn:turn.bistri.com:443?transport=tcp', credential: 'homeo', username: 'homeo' },
   ];
 
   let _selfId = null;
@@ -78,11 +81,15 @@ const FB = (function () {
 
     pc.onicecandidate = async (e) => {
       if (e.candidate) {
+        const c = e.candidate;
+        console.log('[fb] ICE candidate:', c.candidate.substring(0, 60), 'for', remotePeerId.slice(0, 12));
         const key = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         await _fbPut(
           `/rooms/${_roomId}/signals/${remotePeerId}/${_selfId}/candidates/${key}`,
-          { type: 'candidate', candidate: JSON.stringify(e.candidate.toJSON()), from: _selfId }
+          { type: 'candidate', candidate: JSON.stringify(c.toJSON()), from: _selfId }
         );
+      } else {
+        console.log('[fb] ICE gathering complete for', remotePeerId.slice(0, 12));
       }
     };
 
@@ -95,6 +102,7 @@ const FB = (function () {
 
     pc.oniceconnectionstatechange = () => {
       console.log('[fb] ICE state:', pc.iceConnectionState, 'for', remotePeerId.slice(0, 12));
+      console.log('[fb] ICE candidates:', pc.localDescription?.sdp?.match(/a=candidate.*/g)?.length || 0, 'local');
       pc._lastIceCheck = Date.now();
       if (pc.iceConnectionState === 'failed') {
         pc._iceFailCount++;
