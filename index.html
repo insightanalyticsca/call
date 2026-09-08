@@ -7,7 +7,7 @@
   <title>Семейная связь</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="styles.css?v=20260727-dbg3" />
+  <link rel="stylesheet" href="styles.css?v=20260727-fix7" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
   <script>
     // Synchronously restore session BEFORE page renders — prevents login screen flash on reload
@@ -26,9 +26,9 @@
     })();
   </script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" defer></script>
-  <script src="fb-signaling.js?v=20260727-dbg3" defer></script>
-  <script src="gh-store.js?v=20260727-dbg3" defer></script>
-  <script src="app.js?v=20260727-dbg3" defer></script>
+  <script src="fb-signaling.js?v=20260727-fix7" defer></script>
+  <script src="gh-store.js?v=20260727-fix7" defer></script>
+  <script src="app.js?v=20260727-fix7" defer></script>
 </head>
 <body class="auth-only">
   <noscript>Для работы приложения нужен JavaScript.</noscript>
@@ -69,7 +69,6 @@
   <div id="appScreen" class="mobile-app hidden">
     <section id="calls" class="tab-panel call-page active">
       <div id="callStage" class="call-stage">
-        <div id="debugOverlay" style="position:fixed;top:5px;left:5px;z-index:99999;background:rgba(0,0,0,0.85);color:#0f0;font:11px monospace;padding:6px 10px;border-radius:8px;pointer-events:none;max-width:90vw;white-space:pre-line;line-height:1.5"></div>
         <div class="remote-stage">
           <video id="remoteVideo" autoplay playsinline></video>
           <div class="remote-empty">
