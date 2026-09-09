@@ -17,7 +17,7 @@
  * ============================================================ */
 
 /* ---------- Version ---------- */
-const APP_VERSION = 'lk12';
+const APP_VERSION = 'lk13';
 
 /* ---------- Path / config ---------- */
 const BASE_PATH = (function detectBase() {
@@ -789,8 +789,21 @@ async function joinPeerRoom(room) {
   state._room = LK;
 
   // --- Register message handlers BEFORE joinRoom ---
+  // Map of LiveKit peerSid -> { displayName, username, userId }
+  // userId is resolved from _db.users by matching username.
   onHello((data, peerId) => {
-    _peerNames.set(peerId, data.displayName || data.username || 'Гость');
+    const displayName = data.displayName || data.username || 'Гость';
+    const username = data.username || '';
+    // Resolve userId from db
+    let userId = null;
+    if (username && _db) {
+      const u = (_db.users || []).find((x) => x.username === username);
+      if (u) userId = u.id;
+    }
+    _peerNames.set(peerId, displayName);
+    // Store extended peer info for callUser-by-peerId lookup
+    if (!state._peerInfo) state._peerInfo = new Map();
+    state._peerInfo.set(peerId, { displayName, username, userId });
     renderPresence();
     updateConnectionIndicator();
   });
@@ -832,6 +845,7 @@ async function joinPeerRoom(room) {
   });
 
   onRingAccept((_data, peerId) => {
+    console.log('[onRingAccept] received from peer:', peerId);
     toast('Звонок принят ✓', 'ok');
     state._callingPeer = null;
     if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
@@ -842,9 +856,15 @@ async function joinPeerRoom(room) {
         console.warn('[onRingAccept] publish failed:', e.message);
       });
     }
+    // Also mark the pendingCall as accepted in db.json (so monitorPendingCalls doesn't re-trigger)
+    if (state._pendingCallId) {
+      _markPendingCallAccepted(state._pendingCallId);
+      state._pendingCallId = null;
+    }
   });
 
   onRingDecline((_data, peerId) => {
+    console.log('[onRingDecline] received from peer:', peerId);
     toast('Звонок отклонён.', 'warn');
     state._callingPeer = null;
     if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
@@ -857,6 +877,11 @@ async function joinPeerRoom(room) {
     attachLocalStream(null);
     updateMediaControls();
     try { LK.unpublishAll(); } catch (e) { console.warn('[onRingDecline] unpublish:', e.message); }
+    // Also mark the pendingCall as declined in db.json
+    if (state._pendingCallId) {
+      _markPendingCallDeclined(state._pendingCallId);
+      state._pendingCallId = null;
+    }
   });
 
   // --- Set peer event callbacks BEFORE joinRoom ---
@@ -1196,10 +1221,9 @@ async function startCall() {
     return toast('В комнате нет других участников. Убедитесь, что оба выбрали одну комнату.', 'warn');
   }
 
-  // lk11: Capture camera for LOCAL PREVIEW only — do NOT publish yet.
-  // Tracks are published only when the callee accepts (onRingAccept).
-  // This gives the caller a self-preview while waiting, without
-  // sending video to the callee before they accept.
+  const targetPeerId = peerIds[0];
+
+  // lk13: Capture camera for LOCAL PREVIEW only — do NOT publish yet.
   if (!state.localStream || !hasVideoTrack(state.localStream)) {
     toast('Включение камеры…', 'info');
     await ensureLocalMedia(true, false).catch(async (e) => {
@@ -1207,14 +1231,54 @@ async function startCall() {
       return ensureLocalMedia(false, false);
     }).catch(() => {});
   }
-  // If we already have a stream from a previous call, unpublish it
-  // so we don't send video before the callee accepts.
+  // Make sure we're not publishing (in case camera was on from a previous call)
   try { await LK.unpublishAll(); } catch (e) { console.warn('[startCall] unpublish:', e.message); }
 
-  // Send ring notification — callee will show incoming call dialog
-  state._callingPeer = peerIds[0];
+  state._callingPeer = targetPeerId;
+
+  // lk13: Send ring via LiveKit data channel (instant) AND via db.json (fallback).
+  // The data channel ring triggers showIncomingCall immediately.
+  // The db.json pendingCall is a backup — if the data channel fails,
+  // monitorPendingCalls will still show the incoming call within 10s.
   if (state._sendRing) {
     state._sendRing({ displayName: state.user.displayName || state.user.username });
+    console.log('[startCall] ring sent via LiveKit data channel to peer:', targetPeerId);
+  }
+
+  // Also write a pendingCall to db.json as fallback
+  try {
+    await ensureDb();
+    const peerInfo = state._peerInfo?.get(targetPeerId) || {};
+    const calleeId = peerInfo.userId || null;
+    const calleeName = peerInfo.displayName || _peerNames.get(targetPeerId) || 'Гость';
+    if (calleeId) {
+      const callId = randomId('call_');
+      const now = new Date().toISOString();
+      const pendingCall = {
+        id: callId,
+        callerId: state.user.id,
+        callerName: state.user.displayName || state.user.username,
+        calleeId: calleeId,
+        calleeName: calleeName,
+        roomCode: state.currentRoom.code,
+        roomId: state.currentRoom.id,
+        status: 'pending',
+        source: 'in-room',  // distinguishes from cross-room calls
+        createdAt: now,
+        updatedAt: now
+      };
+      if (!_db.pendingCalls) _db.pendingCalls = [];
+      // Remove any existing pending calls from this caller
+      _db.pendingCalls = _db.pendingCalls.filter((c) => !(c.callerId === state.user.id && c.status === 'pending'));
+      _db.pendingCalls.unshift(pendingCall);
+      await saveDb(_db);
+      state._pendingCallId = callId;
+      console.log('[startCall] pendingCall written to db.json as fallback, callId:', callId);
+    } else {
+      console.warn('[startCall] could not resolve callee userId — db.json fallback skipped');
+    }
+  } catch (e) {
+    console.warn('[startCall] db.json fallback failed:', e.message);
   }
 
   // Show "calling..." state on the call stage
@@ -1227,16 +1291,59 @@ async function startCall() {
     if (state._callingPeer) {
       state._callingPeer = null;
       _setCallingState(false);
-      // Stop camera since call wasn't answered
       if (state.localStream) {
         state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
         state.localStream = null;
       }
       attachLocalStream(null);
       updateMediaControls();
+      // Mark the pendingCall as expired
+      if (state._pendingCallId) {
+        _markPendingCallExpired(state._pendingCallId);
+        state._pendingCallId = null;
+      }
       toast('Нет ответа. Звонок отменён.', 'warn');
     }
   }, 60000);
+}
+
+// Helper: mark a pendingCall as expired in db.json
+async function _markPendingCallExpired(callId) {
+  try {
+    await ensureDb();
+    const call = (_db.pendingCalls || []).find((c) => c.id === callId);
+    if (call && call.status === 'pending') {
+      call.status = 'expired';
+      call.updatedAt = new Date().toISOString();
+      await saveDb(_db);
+    }
+  } catch (e) { console.warn('_markPendingCallExpired:', e.message); }
+}
+
+// Helper: mark a pendingCall as accepted in db.json
+async function _markPendingCallAccepted(callId) {
+  try {
+    await ensureDb();
+    const call = (_db.pendingCalls || []).find((c) => c.id === callId);
+    if (call && call.status === 'pending') {
+      call.status = 'accepted';
+      call.updatedAt = new Date().toISOString();
+      await saveDb(_db);
+    }
+  } catch (e) { console.warn('_markPendingCallAccepted:', e.message); }
+}
+
+// Helper: mark a pendingCall as declined in db.json
+async function _markPendingCallDeclined(callId) {
+  try {
+    await ensureDb();
+    const call = (_db.pendingCalls || []).find((c) => c.id === callId);
+    if (call && call.status === 'pending') {
+      call.status = 'declined';
+      call.updatedAt = new Date().toISOString();
+      await saveDb(_db);
+    }
+  } catch (e) { console.warn('_markPendingCallDeclined:', e.message); }
 }
 
 // Show/hide the "calling..." overlay on the call stage
@@ -1295,13 +1402,13 @@ function resetCall() {
 // - If mic ON: turn mic OFF (mute)
 // - If mic OFF (muted): turn mic ON (unmute)
 async function toggleMute() {
-  // No stream yet — start audio only
+  // No stream yet — start audio only (preview, don't publish)
   if (!state.localStream || !hasAudioTrack(state.localStream)) {
-    try { await ensureLocalMedia(false); } catch (e) { toast(e.message, 'bad'); return; }
+    try { await ensureLocalMedia(false, false); } catch (e) { toast(e.message, 'bad'); return; }
     state.micMuted = false;
     updateMediaControls();
     updateCallGuide();
-    toast('Микрофон включён ✓', 'ok');
+    toast('Микрофон включён ✓ (предпросмотр)', 'ok');
     return;
   }
   // Toggle mute state
@@ -1313,17 +1420,17 @@ async function toggleMute() {
 }
 
 // Single toggle button for camera:
-// - If no video stream: turn camera ON
+// - If no video stream: turn camera ON (preview only — does NOT publish to remote)
 // - If camera ON: turn camera OFF (disable video track, keep audio)
 // - If camera OFF: turn camera ON (re-enable video track)
 async function toggleCamera() {
-  // No video stream yet — start camera + mic
+  // No video stream yet — start camera + mic (preview only, don't publish)
   if (!state.localStream || !hasVideoTrack(state.localStream)) {
-    try { await ensureLocalMedia(true); } catch (e) { toast(e.message, 'bad'); return; }
+    try { await ensureLocalMedia(true, false); } catch (e) { toast(e.message, 'bad'); return; }
     state.camOff = false;
     updateMediaControls();
     updateCallGuide();
-    toast('Камера включена ✓', 'ok');
+    toast('Камера включена ✓ (предпросмотр. Нажмите «Позвонить» чтобы начать звонок)', 'ok');
     return;
   }
   // Toggle camera state (disable track, don't destroy — faster re-enable)
@@ -2184,11 +2291,38 @@ async function acceptPendingCall(callId) {
   call.updatedAt = new Date().toISOString();
   await saveDb(_db);
   _closeIncomingCallDialog();
+  _stopIncomingRing();
 
-  // Find the room by code, or create a local entry if not visible
+  // lk13: For in-room calls, we're already in the same room.
+  // Just capture + publish tracks + send ringAccept via data channel.
+  if (call.source === 'in-room' && state.currentRoom && state.currentRoom.code === call.roomCode) {
+    console.log('[acceptPendingCall] in-room call — already in room, publishing tracks');
+    // Send ringAccept via LiveKit data channel (instant, so caller publishes immediately)
+    if (state._sendRingAccept) {
+      // Find the caller's peerId from _peerInfo
+      let callerPeerId = null;
+      if (state._peerInfo) {
+        for (const [pid, info] of state._peerInfo.entries()) {
+          if (info.userId === call.callerId) { callerPeerId = pid; break; }
+        }
+      }
+      state._sendRingAccept({}, callerPeerId);
+      console.log('[acceptPendingCall] ringAccept sent via data channel to peer:', callerPeerId);
+    }
+    // Capture + publish camera
+    try {
+      await ensureLocalMedia(true, true);  // publish=true
+      toast('Видео подключено ✓', 'ok');
+    } catch (e) {
+      console.warn('[acceptPendingCall] camera init failed:', e.message);
+      try { await ensureLocalMedia(false, true); } catch (e2) {}
+    }
+    return;
+  }
+
+  // Cross-room call: need to join the caller's room
   let room = (_db.rooms || []).find((r) => r.code === call.roomCode);
   if (!room) {
-    // Caller's room record hasn't propagated yet — create a placeholder
     room = {
       id: call.roomId || randomId('room_'),
       code: call.roomCode,
@@ -2207,11 +2341,8 @@ async function acceptPendingCall(callId) {
     await saveDb(_db);
   }
   if (!state.rooms.some((r) => r.id === room.id)) state.rooms.unshift(room);
-
-  // Switch to calls tab + join the room
   tab('calls');
   await selectRoom(room.id, room.inviteToken);
-  // Auto-enable camera + mic
   try { await ensureLocalMedia(true); } catch (e) { console.warn('[acceptPendingCall] camera init failed:', e.message); }
   toast(`Подключение к звонку с ${call.callerName}…`, 'info');
 }
@@ -2225,6 +2356,18 @@ async function declinePendingCall(callId) {
   call.updatedAt = new Date().toISOString();
   await saveDb(_db);
   _closeIncomingCallDialog();
+  _stopIncomingRing();
+
+  // For in-room calls, also send ringDecline via data channel (instant)
+  if (call.source === 'in-room' && state._sendRingDecline) {
+    let callerPeerId = null;
+    if (state._peerInfo) {
+      for (const [pid, info] of state._peerInfo.entries()) {
+        if (info.userId === call.callerId) { callerPeerId = pid; break; }
+      }
+    }
+    state._sendRingDecline({}, callerPeerId);
+  }
   toast('Звонок отклонён.', 'warn');
 }
 
@@ -2272,21 +2415,42 @@ function monitorPendingCalls() {
   }
 
   // Look for outgoing calls I placed — react to status changes
+  // This handles BOTH in-room and cross-room calls.
   const outgoing = calls.find((c) => c.callerId === state.user.id && (c.status === 'pending' || c.status === 'accepted' || c.status === 'declined'));
   if (outgoing && outgoing.status === 'accepted') {
-    if (document.getElementById('outgoingCallDialog')) {
-      _closeOutgoingCallDialog();
+    // Callee accepted via db.json (or data channel accept already marked it)
+    if (state._callingPeer) {
+      // Still in calling state — publish tracks now
+      state._callingPeer = null;
+      if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
+      _setCallingState(false);
+      if (state.localStream && state._room && state._room.publishLocalStream) {
+        state._room.publishLocalStream(state.localStream).catch((e) => {
+          console.warn('[monitorPendingCalls] publish failed:', e.message);
+        });
+      }
       toast(`${outgoing.calleeName} принял звонок ✓`, 'ok');
     }
+    state._pendingCallId = null;
   } else if (outgoing && outgoing.status === 'declined') {
-    if (document.getElementById('outgoingCallDialog')) {
-      _closeOutgoingCallDialog();
-      toast(`${outgoing.calleeName} отклонил звонок.`, 'warn');
-      // Leave the room we created
-      if (state.currentRoom?.code === outgoing.roomCode) {
-        leaveRoom().catch(() => {});
+    if (state._callingPeer) {
+      state._callingPeer = null;
+      if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
+      _setCallingState(false);
+      if (state.localStream) {
+        state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+        state.localStream = null;
       }
+      attachLocalStream(null);
+      updateMediaControls();
+      try { LK.unpublishAll(); } catch (e) { console.warn('[monitorPendingCalls] unpublish:', e.message); }
+      toast(`${outgoing.calleeName} отклонил звонок.`, 'warn');
     }
+    // For cross-room calls, leave the room we created
+    if (outgoing.source !== 'in-room' && state.currentRoom?.code === outgoing.roomCode) {
+      leaveRoom().catch(() => {});
+    }
+    state._pendingCallId = null;
   }
 }
 
