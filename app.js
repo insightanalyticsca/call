@@ -17,7 +17,7 @@
  * ============================================================ */
 
 /* ---------- Version ---------- */
-const APP_VERSION = 'lk13';
+const APP_VERSION = 'lk14';
 
 /* ---------- Path / config ---------- */
 const BASE_PATH = (function detectBase() {
@@ -838,9 +838,11 @@ async function joinPeerRoom(room) {
 
   onRing((data, peerId) => {
     const callerName = data?.displayName || 'Участник';
-    if (state.remoteStreams.has(peerId)) return;
-    if (state._callingPeer === peerId) return;
-    if (document.getElementById('incomingCallDialog')) return;
+    console.log('[onRing] received from peer:', peerId, 'caller:', callerName);
+    // lk14: removed the remoteStreams.has(peerId) guard — it prevented
+    // the dialog from showing if stale streams existed. Always show the dialog.
+    if (state._callingPeer === peerId) return;  // we're calling them, ignore their ring
+    if (document.getElementById('incomingCallDialog')) return;  // already showing
     showIncomingCall(callerName, peerId);
   });
 
@@ -1245,12 +1247,28 @@ async function startCall() {
     console.log('[startCall] ring sent via LiveKit data channel to peer:', targetPeerId);
   }
 
-  // Also write a pendingCall to db.json as fallback
+  // Also write a pendingCall to db.json as fallback.
+  // lk14: Resolve callee userId from _db.users directly (not from _peerInfo).
+  // _peerInfo depends on the onHello message arriving before startCall,
+  // which is a race condition. For a family app, the callee is simply
+  // "the other user in _db.users that's not me".
   try {
     await ensureDb();
+    // Try _peerInfo first (has the exact match)
     const peerInfo = state._peerInfo?.get(targetPeerId) || {};
-    const calleeId = peerInfo.userId || null;
-    const calleeName = peerInfo.displayName || _peerNames.get(targetPeerId) || 'Гость';
+    let calleeId = peerInfo.userId || null;
+    let calleeName = peerInfo.displayName || _peerNames.get(targetPeerId) || '';
+
+    // Fallback: look up any other user in _db.users
+    if (!calleeId) {
+      const otherUsers = (_db.users || []).filter((u) => u.id !== state.user.id && !u.disabled);
+      if (otherUsers.length > 0) {
+        calleeId = otherUsers[0].id;
+        if (!calleeName) calleeName = otherUsers[0].displayName || otherUsers[0].username;
+        console.log('[startCall] resolved callee from _db.users:', calleeName, calleeId);
+      }
+    }
+
     if (calleeId) {
       const callId = randomId('call_');
       const now = new Date().toISOString();
@@ -1259,23 +1277,22 @@ async function startCall() {
         callerId: state.user.id,
         callerName: state.user.displayName || state.user.username,
         calleeId: calleeId,
-        calleeName: calleeName,
+        calleeName: calleeName || 'Гость',
         roomCode: state.currentRoom.code,
         roomId: state.currentRoom.id,
         status: 'pending',
-        source: 'in-room',  // distinguishes from cross-room calls
+        source: 'in-room',
         createdAt: now,
         updatedAt: now
       };
       if (!_db.pendingCalls) _db.pendingCalls = [];
-      // Remove any existing pending calls from this caller
       _db.pendingCalls = _db.pendingCalls.filter((c) => !(c.callerId === state.user.id && c.status === 'pending'));
       _db.pendingCalls.unshift(pendingCall);
       await saveDb(_db);
       state._pendingCallId = callId;
-      console.log('[startCall] pendingCall written to db.json as fallback, callId:', callId);
+      console.log('[startCall] pendingCall written to db.json, callId:', callId, 'callee:', calleeName);
     } else {
-      console.warn('[startCall] could not resolve callee userId — db.json fallback skipped');
+      console.warn('[startCall] could not resolve callee userId even from _db.users');
     }
   } catch (e) {
     console.warn('[startCall] db.json fallback failed:', e.message);
@@ -1284,6 +1301,13 @@ async function startCall() {
   // Show "calling..." state on the call stage
   _setCallingState(true);
   toast(`Звонок отправлен. Ожидание ответа…`, 'ok');
+
+  // lk14: After 8s, if still calling, show a hint to the caller
+  setTimeout(() => {
+    if (state._callingPeer) {
+      toast('Если собеседник не видит звонок — попросите его обновить страницу (Ctrl+Shift+R)', 'info');
+    }
+  }, 8000);
 
   // Auto-cancel after 60s if no answer
   if (state._callTimeout) clearTimeout(state._callTimeout);
