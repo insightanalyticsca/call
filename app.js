@@ -17,7 +17,7 @@
  * ============================================================ */
 
 /* ---------- Version ---------- */
-const APP_VERSION = 'lk15';
+const APP_VERSION = 'lk16';
 
 /* ---------- Path / config ---------- */
 const BASE_PATH = (function detectBase() {
@@ -412,6 +412,10 @@ const state = {
   recordStartedAt: 0,
   recordTimerId: null,
   _recordingCall: false,  // true while recording an active call (lk9)
+  _callActive: false,     // lk16: true when a call is active (ring sent/accepted)
+  _callingPeer: null,     // lk11: peerId of the person we're calling
+  _callTimeout: null,     // lk11: timeout for auto-cancel
+  _pendingCallId: null,   // lk13: db.json pendingCall ID for fallback ring
   installPrompt: null,
   health: { ok: true, storageWritable: true, ffmpegAvailable: false, maxUploadMb: 2048 },
   pendingJoin: null
@@ -832,6 +836,7 @@ async function joinPeerRoom(room) {
     attachLocalStream(null);
     updateMediaControls();
     state._callingPeer = null;
+    state._callActive = false;  // lk16
     _setCallingState(false);
     toast('Собеседник завершил звонок.');
   });
@@ -869,6 +874,7 @@ async function joinPeerRoom(room) {
     console.log('[onRingDecline] received from peer:', peerId);
     toast('Звонок отклонён.', 'warn');
     state._callingPeer = null;
+    state._callActive = false;  // lk16
     if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
     _setCallingState(false);
     // Callee declined — stop camera, unpublish
@@ -907,19 +913,15 @@ async function joinPeerRoom(room) {
   };
 
   LK.onPeerStream = (stream, peerId) => {
-    // lk12: Only display remote video when a call is active.
-    // A "call is active" means either:
-    //   - we initiated a call (state._callingPeer is set), OR
-    //   - we already accepted an incoming call (state.remoteStreams has entries),
-    //     OR
-    //   - we have an active local stream being published (our camera is on for a call)
-    // This prevents video from appearing just because both users joined the room.
-    const callActive = !!state._callingPeer || state.remoteStreams.size > 0 ||
-                       (state.localStream && state._room && state.localStream.getTracks().some(t => t.readyState === 'live'));
-    if (!callActive) {
-      console.log('[lk12] onPeerStream: ignoring remote track — no active call');
+    // lk16: Only display remote video when a call is active.
+    // state._callActive is set to true the moment we initiate or accept a call,
+    // BEFORE any await. This ensures that even if the remote peer's tracks
+    // arrive while we're still awaiting getUserMedia, they're not blocked.
+    if (!state._callActive) {
+      console.log('[lk16] onPeerStream: ignoring remote track — no active call (state._callActive=false)');
       return;
     }
+    console.log('[lk16] onPeerStream: accepting remote track (call active)');
     // LiveKit sends tracks one at a time — merge into existing stream
     let existing = state.remoteStreams.get(peerId);
     if (existing) {
@@ -982,6 +984,9 @@ function showIncomingCall(callerName, peerId) {
 
   document.getElementById('acceptCallBtn').onclick = async () => {
     dialog.remove();
+    // lk16: Mark call as active BEFORE sending ringAccept or awaiting getUserMedia.
+    // This ensures the caller's tracks (which arrive after ringAccept) aren't blocked.
+    state._callActive = true;
     if (state._sendRingAccept) state._sendRingAccept({}, peerId);
     toast('Подключение к звонку…', 'info');
     try {
@@ -1279,6 +1284,10 @@ async function startCall() {
 
   const targetPeerId = peerIds[0];
 
+  // lk16: Mark call as active BEFORE any await. This ensures onPeerStream
+  // doesn't block the callee's tracks when they arrive.
+  state._callActive = true;
+
   // lk13: Capture camera for LOCAL PREVIEW only — do NOT publish yet.
   if (!state.localStream || !hasVideoTrack(state.localStream)) {
     toast('Включение камеры…', 'info');
@@ -1368,6 +1377,7 @@ async function startCall() {
   state._callTimeout = setTimeout(() => {
     if (state._callingPeer) {
       state._callingPeer = null;
+      state._callActive = false;  // lk16
       _setCallingState(false);
       if (state.localStream) {
         state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
@@ -1458,6 +1468,7 @@ function hangup(notify = true) {
   attachLocalStream(null);
   updateMediaControls();
   state._callingPeer = null;
+  state._callActive = false;  // lk16: call no longer active
   if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
   _setCallingState(false);
   setStatus($('#peerStatus'), 'WebRTC: нет соединения', 'warn');
@@ -2361,6 +2372,10 @@ async function cancelPendingCall(callId, reason = 'cancelled') {
 }
 
 async function acceptPendingCall(callId) {
+  // lk16: Mark call as active BEFORE any await. This ensures onPeerStream
+  // doesn't block the caller's tracks when they arrive (which can happen
+  // before ensureLocalMedia completes).
+  state._callActive = true;
   await ensureDb();
   const call = (_db.pendingCalls || []).find((c) => c.id === callId);
   if (!call) return;
@@ -2513,6 +2528,7 @@ function monitorPendingCalls() {
   } else if (outgoing && outgoing.status === 'declined') {
     if (state._callingPeer) {
       state._callingPeer = null;
+      state._callActive = false;  // lk16
       if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
       _setCallingState(false);
       if (state.localStream) {
