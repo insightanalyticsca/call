@@ -196,7 +196,7 @@ const GH = (function () {
             return;
           }
         }
-        reject(new Error('updateDb: gave up after 5 retries'));
+        reject(new Error('updateDb: gave up after 8 retries (409 conflicts)'));
       }).catch(reject);
     });
   }

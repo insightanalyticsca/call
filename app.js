@@ -17,7 +17,7 @@
  * ============================================================ */
 
 /* ---------- Version ---------- */
-const APP_VERSION = 'lk16';
+const APP_VERSION = 'lk17';
 
 /* ---------- Path / config ---------- */
 const BASE_PATH = (function detectBase() {
@@ -914,20 +914,38 @@ async function joinPeerRoom(room) {
 
   LK.onPeerStream = (stream, peerId) => {
     // lk16: Only display remote video when a call is active.
-    // state._callActive is set to true the moment we initiate or accept a call,
-    // BEFORE any await. This ensures that even if the remote peer's tracks
-    // arrive while we're still awaiting getUserMedia, they're not blocked.
     if (!state._callActive) {
       console.log('[lk16] onPeerStream: ignoring remote track — no active call (state._callActive=false)');
       return;
     }
     console.log('[lk16] onPeerStream: accepting remote track (call active)');
+
+    // lk17: MEDIA-BASED ACCEPT DETECTION
+    // If we're the caller (state._callingPeer is set) and we receive the
+    // callee's tracks, that means they accepted the call. The ringAccept
+    // data channel message may not have reached us (unreliable on mobile),
+    // but the MEDIA definitely arrives. So auto-publish our tracks now.
+    if (state._callingPeer && state._callingPeer === peerId) {
+      console.log('[lk17] caller received callee tracks — auto-publishing (media-based accept)');
+      state._callingPeer = null;
+      if (state._callTimeout) { clearTimeout(state._callTimeout); state._callTimeout = null; }
+      _setCallingState(false);
+      if (state.localStream && state._room && state._room.publishLocalStream) {
+        state._room.publishLocalStream(state.localStream).catch((e) => {
+          console.warn('[lk17] auto-publish failed:', e.message);
+        });
+      }
+      // Mark pendingCall as accepted in db.json (if we have one)
+      if (state._pendingCallId) {
+        _markPendingCallAccepted(state._pendingCallId);
+        state._pendingCallId = null;
+      }
+    }
+
     // LiveKit sends tracks one at a time — merge into existing stream
     let existing = state.remoteStreams.get(peerId);
     if (existing) {
-      // Add new tracks to existing stream
       stream.getTracks().forEach(t => {
-        // Remove old track of same kind
         existing.getTracks().forEach(old => {
           if (old.kind === t.kind) existing.removeTrack(old);
         });
