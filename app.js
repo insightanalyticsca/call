@@ -17,7 +17,7 @@
  * ============================================================ */
 
 /* ---------- Version ---------- */
-const APP_VERSION = 'lk17';
+const APP_VERSION = 'lk18';
 
 /* ---------- Path / config ---------- */
 const BASE_PATH = (function detectBase() {
@@ -1286,6 +1286,18 @@ async function startCall() {
   if (!state.currentRoom) return toast('Сначала выберите комнату.', 'warn');
   if (!state._room) return toast('Сигналинг не подключён.', 'bad');
 
+  // lk18: Guard against multiple invocations — if a call is already active,
+  // ignore the click. This prevents "multiple call attempts on single click".
+  if (state._callActive || state._callingPeer) {
+    console.log('[startCall] already calling/active — ignoring');
+    toast('Звонок уже активен. Отмените текущий звонок сначала.', 'warn');
+    return;
+  }
+
+  // Disable the call button to prevent double-clicks
+  const callBtn = $('#callBtn');
+  if (callBtn) callBtn.disabled = true;
+
   // Wait for peers to be discovered
   let peerIds = Object.keys(state._room.getPeers());
   if (peerIds.length === 0) {
@@ -1320,12 +1332,27 @@ async function startCall() {
   state._callingPeer = targetPeerId;
 
   // lk13: Send ring via LiveKit data channel (instant) AND via db.json (fallback).
-  // The data channel ring triggers showIncomingCall immediately.
-  // The db.json pendingCall is a backup — if the data channel fails,
-  // monitorPendingCalls will still show the incoming call within 10s.
+  // lk18: Send ring via LiveKit data channel, RETRY 3 times (0s, 3s, 6s).
+  // The data channel ring may be lost on mobile (unreliable). Retrying
+  // increases the chance of delivery. Combined with the db.json fallback
+  // below, the callee should see the incoming call within seconds.
   if (state._sendRing) {
-    state._sendRing({ displayName: state.user.displayName || state.user.username });
-    console.log('[startCall] ring sent via LiveKit data channel to peer:', targetPeerId);
+    const ringData = { displayName: state.user.displayName || state.user.username };
+    state._sendRing(ringData);
+    console.log('[startCall] ring #1 sent via data channel');
+    // Retry at 3s and 6s (only if still calling)
+    setTimeout(() => {
+      if (state._callingPeer && state._sendRing) {
+        state._sendRing(ringData);
+        console.log('[startCall] ring #2 sent via data channel');
+      }
+    }, 3000);
+    setTimeout(() => {
+      if (state._callingPeer && state._sendRing) {
+        state._sendRing(ringData);
+        console.log('[startCall] ring #3 sent via data channel');
+      }
+    }, 6000);
   }
 
   // Also write a pendingCall to db.json as fallback.
@@ -1463,6 +1490,9 @@ function _setCallingState(calling) {
       subline.textContent = `Комната ${room.code} готова. Откройте камеры и нажмите «Позвонить».`;
     }
   }
+  // lk18: Re-enable the call button when calling state ends
+  const callBtn = $('#callBtn');
+  if (callBtn && !calling) callBtn.disabled = false;
 }
 
 function hangup(notify = true) {
@@ -2976,7 +3006,9 @@ async function init() {
     if (savedTab === 'stats') refreshStats().catch(() => {});
   }
   // Start polling GitHub for db.json changes every 10s (chat / rooms / files sync)
-  GH.startPolling(10000);
+  // lk18: Poll every 5s (was 10s) for faster call notification.
+  // The db.json fallback ring needs to reach the callee quickly.
+  GH.startPolling(5000);
   GH.onDbChange((newDb) => {
     _db = newDb;
     if (state.user) {
