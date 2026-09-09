@@ -1226,3 +1226,58 @@ label { display: grid; gap: 7px; color: var(--text-muted); font-size: 13px; font
   0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
   50%      { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
 }
+
+/* ============================================================
+ * lk19: Video transform controls (zoom, rotate, pan, fit)
+ * ============================================================ */
+
+/* The video element gets a CSS transform applied via JS.
+   We use transform-origin: center so zoom/rotate are centered. */
+#remoteVideo {
+  transform-origin: center center;
+  transition: transform 0.2s ease-out;
+  cursor: grab;
+  touch-action: none; /* allow drag-pan without browser gestures */
+}
+#remoteVideo.dragging { cursor: grabbing; transition: none; }
+
+/* Floating control buttons — bottom-right of the remote stage */
+.video-controls {
+  position: absolute;
+  bottom: 90px; /* above the call controls */
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 60;
+  opacity: 0.85;
+  transition: opacity 0.2s;
+}
+.video-controls.hidden { display: none; }
+.video-controls:hover { opacity: 1; }
+
+.vid-ctrl-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(17, 24, 39, 0.8);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: white;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  transition: background 0.15s, transform 0.1s;
+  user-select: none;
+}
+.vid-ctrl-btn:hover { background: rgba(37, 99, 235, 0.8); }
+.vid-ctrl-btn:active { transform: scale(0.9); }
+.vid-ctrl-btn.fit-active { background: rgba(37, 99, 235, 0.8); }
+
+/* When UI is hidden (fullscreen mode), also hide video controls
+   unless user taps the video to show UI */
+.call-stage.ui-hidden .video-controls { opacity: 0; pointer-events: none; }

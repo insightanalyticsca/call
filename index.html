@@ -7,7 +7,7 @@
   <title>Семейная связь</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="styles.css?v=20260727-lk18" />
+  <link rel="stylesheet" href="styles.css?v=20260727-lk19" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
   <script>
     // Synchronously restore session BEFORE page renders — prevents login screen flash on reload
@@ -26,10 +26,10 @@
     })();
   </script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" defer></script>
-  <script src="livekit.js?v=20260727-lk18" defer></script>
-  <script src="fb-signaling.js?v=20260727-lk18" defer></script>
-  <script src="gh-store.js?v=20260727-lk18" defer></script>
-  <script src="app.js?v=20260727-lk18" defer></script>
+  <script src="livekit.js?v=20260727-lk19" defer></script>
+  <script src="fb-signaling.js?v=20260727-lk19" defer></script>
+  <script src="gh-store.js?v=20260727-lk19" defer></script>
+  <script src="app.js?v=20260727-lk19" defer></script>
 </head>
 <body class="auth-only">
   <noscript>Для работы приложения нужен JavaScript.</noscript>
@@ -77,6 +77,14 @@
             <h2>Семейный звонок</h2>
             <p id="callSubline">Выберите комнату ниже.</p>
             <div id="callGuide" class="call-guide"></div>
+          </div>
+          <!-- lk19: Video transform controls (zoom, rotate, pan, fit) -->
+          <div id="videoControls" class="video-controls hidden">
+            <button id="vidZoomOut" class="vid-ctrl-btn" data-tip="Уменьшить" title="Уменьшить" aria-label="Уменьшить">−</button>
+            <button id="vidZoomIn" class="vid-ctrl-btn" data-tip="Увеличить" title="Увеличить" aria-label="Увеличить">+</button>
+            <button id="vidRotate" class="vid-ctrl-btn" data-tip="Повернуть" title="Повернуть" aria-label="Повернуть">⟳</button>
+            <button id="vidFit" class="vid-ctrl-btn" data-tip="Вписать/заполнить" title="Вписать/заполнить" aria-label="Вписать/заполнить">⤢</button>
+            <button id="vidReset" class="vid-ctrl-btn" data-tip="Сбросить" title="Сбросить" aria-label="Сбросить">⊙</button>
           </div>
         </div>
 

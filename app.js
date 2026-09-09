@@ -17,7 +17,7 @@
  * ============================================================ */
 
 /* ---------- Version ---------- */
-const APP_VERSION = 'lk18';
+const APP_VERSION = 'lk19';
 
 /* ---------- Path / config ---------- */
 const BASE_PATH = (function detectBase() {
@@ -1068,6 +1068,8 @@ function updateRemoteVideo() {
   if (streams.length === 0) {
     v.srcObject = null;
     stage?.classList.remove('has-remote');
+    _showVideoControls(false);  // lk19: hide video controls
+    _vidReset();                // lk19: reset transform
     updateCallRecordButton();
     return;
   }
@@ -1081,6 +1083,11 @@ function updateRemoteVideo() {
   }
   // lk15: Force play with retry — iOS Safari sometimes pauses video.
   _forcePlayVideo(v);
+  // lk19: Show video controls + setup drag/pinch
+  _showVideoControls(true);
+  _setupVideoDragPan();
+  _setupPinchZoom();
+  _applyVideoTransform();
   updateCallRecordButton();
 }
 
@@ -1136,6 +1143,161 @@ function _forcePlayVideo(v) {
     });
   }
 })();
+
+/* ============================================================
+ * lk19: Video transform controls (zoom, rotate, pan, fit)
+ * ============================================================ */
+
+// Transform state — applied to #remoteVideo via CSS transform.
+state._vidTransform = { zoom: 1, rotate: 0, panX: 0, panY: 0, fit: 'cover' };
+
+function _applyVideoTransform() {
+  const v = $('#remoteVideo');
+  if (!v) return;
+  const t = state._vidTransform;
+  // Apply object-fit separately (not a transform)
+  v.style.objectFit = t.fit;
+  // CSS transform: translate first, then scale, then rotate
+  v.style.transform = `translate(${t.panX}px, ${t.panY}px) scale(${t.zoom}) rotate(${t.rotate}deg)`;
+}
+
+function _showVideoControls(show) {
+  const c = $('#videoControls');
+  if (!c) return;
+  // Show only when there's a remote stream
+  const hasRemote = state.remoteStreams.size > 0;
+  c.classList.toggle('hidden', !(show && hasRemote));
+}
+
+function _vidZoomIn() {
+  state._vidTransform.zoom = Math.min(state._vidTransform.zoom + 0.25, 4);
+  _applyVideoTransform();
+  toast(`Zoom: ${Math.round(state._vidTransform.zoom * 100)}%`, 'info');
+}
+
+function _vidZoomOut() {
+  state._vidTransform.zoom = Math.max(state._vidTransform.zoom - 0.25, 0.5);
+  _applyVideoTransform();
+  toast(`Zoom: ${Math.round(state._vidTransform.zoom * 100)}%`, 'info');
+}
+
+function _vidRotate() {
+  state._vidTransform.rotate = (state._vidTransform.rotate + 90) % 360;
+  _applyVideoTransform();
+  toast(`Поворот: ${state._vidTransform.rotate}°`, 'info');
+}
+
+function _vidFit() {
+  const v = $('#remoteVideo');
+  if (!v) return;
+  // Toggle between 'cover' (fill, may crop) and 'contain' (letterbox, see all)
+  state._vidTransform.fit = (state._vidTransform.fit === 'cover') ? 'contain' : 'cover';
+  _applyVideoTransform();
+  // Update button active state
+  const btn = $('#vidFit');
+  if (btn) btn.classList.toggle('fit-active', state._vidTransform.fit === 'contain');
+  toast(state._vidTransform.fit === 'cover' ? 'Заполнить экран' : 'Вписать целиком', 'info');
+}
+
+function _vidReset() {
+  state._vidTransform = { zoom: 1, rotate: 0, panX: 0, panY: 0, fit: 'cover' };
+  _applyVideoTransform();
+  const btn = $('#vidFit');
+  if (btn) btn.classList.remove('fit-active');
+  toast('Видео сброшено', 'info');
+}
+
+// Drag-to-pan on the remote video (touch + mouse)
+function _setupVideoDragPan() {
+  const v = $('#remoteVideo');
+  if (!v || v._lk19DragSetup) return;
+  v._lk19DragSetup = true;
+
+  let dragging = false;
+  let startX = 0, startY = 0;
+  let startPanX = 0, startPanY = 0;
+
+  function onStart(e) {
+    // Only pan when there's a remote stream
+    if (state.remoteStreams.size === 0) return;
+    // Don't start drag if clicking on a button
+    if (e.target.closest('button')) return;
+    dragging = true;
+    v.classList.add('dragging');
+    const pt = e.touches ? e.touches[0] : e;
+    startX = pt.clientX;
+    startY = pt.clientY;
+    startPanX = state._vidTransform.panX;
+    startPanY = state._vidTransform.panY;
+    e.preventDefault();
+  }
+
+  function onMove(e) {
+    if (!dragging) return;
+    const pt = e.touches ? e.touches[0] : e;
+    const dx = pt.clientX - startX;
+    const dy = pt.clientY - startY;
+    state._vidTransform.panX = startPanX + dx;
+    state._vidTransform.panY = startPanY + dy;
+    _applyVideoTransform();
+    e.preventDefault();
+  }
+
+  function onEnd() {
+    if (!dragging) return;
+    dragging = false;
+    v.classList.remove('dragging');
+    // Mark that we just dragged so the click handler doesn't toggle UI
+    v._lk19JustDragged = true;
+    setTimeout(() => { v._lk19JustDragged = false; }, 100);
+  }
+
+  v.addEventListener('mousedown', onStart);
+  v.addEventListener('touchstart', onStart, { passive: false });
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('touchmove', onMove, { passive: false });
+  document.addEventListener('mouseup', onEnd);
+  document.addEventListener('touchend', onEnd);
+  document.addEventListener('touchcancel', onEnd);
+}
+
+// Pinch-to-zoom on touch devices
+function _setupPinchZoom() {
+  const v = $('#remoteVideo');
+  if (!v || v._lk19PinchSetup) return;
+  v._lk19PinchSetup = true;
+
+  let pinchDist = 0;
+  let pinchZoomStart = 1;
+
+  function getDist(touches) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  v.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2 && state.remoteStreams.size > 0) {
+      pinchDist = getDist(e.touches);
+      pinchZoomStart = state._vidTransform.zoom;
+      e.preventDefault();
+    }
+  }, { passive: false });
+
+  v.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2 && pinchDist > 0) {
+      const newDist = getDist(e.touches);
+      const ratio = newDist / pinchDist;
+      state._vidTransform.zoom = Math.max(0.5, Math.min(pinchZoomStart * ratio, 4));
+      _applyVideoTransform();
+      e.preventDefault();
+    }
+  }, { passive: false });
+
+  v.addEventListener('touchend', (e) => {
+    if (e.touches.length < 2) pinchDist = 0;
+  });
+}
 
 /* ---------- Call-recording toggle (lk9) ----------
  * The 'Запись' button is hidden by default and only appears when
@@ -2856,6 +3018,13 @@ function bind() {
   bindClick('#joinRoomByCodeBtn', joinRoomByCodeManual);
   bindClick('#showUiBtn', () => $('#callStage')?.classList.remove('ui-hidden'));
   // Fullscreen toggle — handles iOS Safari (no Fullscreen API on divs)
+  // lk19: Video transform controls
+  bindClick('#vidZoomIn', _vidZoomIn);
+  bindClick('#vidZoomOut', _vidZoomOut);
+  bindClick('#vidRotate', _vidRotate);
+  bindClick('#vidFit', _vidFit);
+  bindClick('#vidReset', _vidReset);
+
   bindClick('#fullscreenBtn', async () => {
     const stage = $('#callStage');
     const video = $('#remoteVideo');
@@ -2896,10 +3065,15 @@ function bind() {
     }
   });
   // Click on remote video = toggle UI (for iOS where fullscreen API doesn't work)
+  // lk19: Click on remote video toggles UI (but only if it wasn't a drag)
+  // The drag-pan handler in _setupVideoDragPan handles mousedown/touchstart.
+  // A click (no movement) falls through here and toggles UI.
   $('#remoteVideo')?.addEventListener('click', (e) => {
+    // If we just finished dragging, don't toggle UI
+    if (e.currentTarget._lk19JustDragged) { e.currentTarget._lk19JustDragged = false; return; }
     e.stopPropagation();
     $('#callStage')?.classList.toggle('ui-hidden');
-    window.scrollTo(0, 0); // hide Safari address bar
+    window.scrollTo(0, 0);
   });
   // Click on stage areas (not buttons/video) = toggle UI
   $('#callStage')?.addEventListener('click', (e) => {
