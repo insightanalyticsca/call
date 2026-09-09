@@ -17,7 +17,7 @@
  * ============================================================ */
 
 /* ---------- Version ---------- */
-const APP_VERSION = 'lk14';
+const APP_VERSION = 'lk15';
 
 /* ---------- Path / config ---------- */
 const BASE_PATH = (function detectBase() {
@@ -1041,24 +1041,78 @@ async function disconnectPeer() {
 function updateRemoteVideo() {
   const streams = Array.from(state.remoteStreams.values());
   const stage = document.querySelector('.remote-stage');
+  const v = $('#remoteVideo');
   if (streams.length === 0) {
-    $('#remoteVideo').srcObject = null;
+    v.srcObject = null;
     stage?.classList.remove('has-remote');
     updateCallRecordButton();
     return;
   }
   stage?.classList.add('has-remote');
   if (streams.length === 1) {
-    $('#remoteVideo').srcObject = streams[0];
-    $('#remoteVideo')?.play()?.catch(() => {});
+    v.srcObject = streams[0];
   } else {
     const mixed = new MediaStream();
     for (const s of streams) s.getTracks().forEach((t) => mixed.addTrack(t));
-    $('#remoteVideo').srcObject = mixed;
-    $('#remoteVideo')?.play()?.catch(() => {});
+    v.srcObject = streams[0]; // For 1:1 calls, just use the first stream
   }
+  // lk15: Force play with retry — iOS Safari sometimes pauses video.
+  _forcePlayVideo(v);
   updateCallRecordButton();
 }
+
+// lk15: Force video to play, retrying if it pauses.
+// iOS Safari and some Android browsers pause video elements when they
+// think the user isn't interacting. This keeps the remote video playing.
+function _forcePlayVideo(v) {
+  if (!v) return;
+  v.muted = false;
+  v.play?.().catch((e) => {
+    console.warn('[updateRemoteVideo] play() failed:', e.message);
+    // If autoplay was blocked, try muting and playing (browsers allow muted autoplay)
+    if (e.name === 'NotAllowedError') {
+      v.muted = true;
+      v.play?.().catch(() => {});
+      // Unmute after 1s (user interaction may have happened by then)
+      setTimeout(() => { v.muted = false; }, 1000);
+    }
+  });
+}
+
+// lk15: Global pause detector — if the remote video pauses for any reason,
+// immediately try to resume it. This prevents "freeze after a few seconds".
+(function _setupRemoteVideoPauseGuard() {
+  // Defer until DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _attachPauseGuard);
+  } else {
+    _attachPauseGuard();
+  }
+  function _attachPauseGuard() {
+    const v = document.getElementById('remoteVideo');
+    if (!v || v._lk15PauseGuard) return;
+    v._lk15PauseGuard = true;
+    v.addEventListener('pause', () => {
+      // Don't force play if srcObject is null (call ended)
+      if (v.srcObject) {
+        console.log('[lk15] remote video paused — forcing play()');
+        v.play?.().catch(() => {});
+      }
+    });
+    v.addEventListener('stalled', () => {
+      if (v.srcObject) {
+        console.log('[lk15] remote video stalled — forcing play()');
+        v.play?.().catch(() => {});
+      }
+    });
+    v.addEventListener('suspend', () => {
+      if (v.srcObject) {
+        console.log('[lk15] remote video suspended — forcing play()');
+        v.play?.().catch(() => {});
+      }
+    });
+  }
+})();
 
 /* ---------- Call-recording toggle (lk9) ----------
  * The 'Запись' button is hidden by default and only appears when

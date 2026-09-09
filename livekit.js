@@ -106,7 +106,12 @@ const LK = (function () {
       const token = await _createToken(roomId, participantName);
 
       // Create the Room instance — do NOT connect yet.
-      _room = new Room({ adaptiveStream: true, dynacast: true });
+      // lk15: adaptiveStream=false — prevents LiveKit from unsubscribing
+      // video tracks when it thinks the subscriber doesn't need them.
+      // This was causing the answerer's video to freeze after a few seconds
+      // (trackUnsubscribed would fire, killing the video stream).
+      // For a 1:1 family call, we want the video to always play at full quality.
+      _room = new Room({ adaptiveStream: false, dynacast: false });
 
       // ============================================================
       // CRITICAL: register ALL event handlers BEFORE connect().
@@ -161,13 +166,41 @@ const LK = (function () {
         // participant is still in the room (e.g. they muted video).
       });
 
+      // lk15: Handle track mute/unmute — when a track is muted (e.g. camera off)
+      // and then unmuted, re-deliver the stream so the video element updates.
+      _room.on('trackMuted', (pub, p) => {
+        console.log('[lk] track muted:', pub?.kind, 'from:', p?.identity);
+      });
+
+      _room.on('trackUnmuted', (pub, p) => {
+        console.log('[lk] track unmuted:', pub?.kind, 'from:', p?.identity);
+        // Re-deliver the track if it has a mediaStreamTrack
+        try {
+          if (pub.track && pub.track.mediaStreamTrack) {
+            const stream = new MediaStream([pub.track.mediaStreamTrack]);
+            if (_onPeerStream) _onPeerStream(stream, p.sid);
+          }
+        } catch (e) { console.warn('[lk] track unmute error:', e.message); }
+      });
+
+      // lk15: Handle stream re-connection — if a track is re-published,
+      // deliver the new stream.
+      _room.on('trackReplaced', (track, pub, p) => {
+        console.log('[lk] track replaced:', track?.kind, 'from:', p?.identity);
+        try {
+          const mediaTrack = track?.mediaStreamTrack || track;
+          if (mediaTrack) {
+            const stream = new MediaStream([mediaTrack]);
+            if (_onPeerStream) _onPeerStream(stream, p.sid);
+          }
+        } catch (e) { console.warn('[lk] track replace error:', e.message); }
+      });
+
       _room.on('trackSubscriptionFailed', (track, pub, p, reason) => {
         console.warn('[lk] track subscription failed:', pub?.trackSid, 'from:', p?.identity, 'reason:', reason);
       });
 
       _room.on('trackPublished', (pub, p) => {
-        // A remote participant published a new track. LiveKit will auto-subscribe
-        // (adaptiveStream) and fire `trackSubscribed` shortly after — no action here.
         console.log('[lk] track published:', pub?.trackSid, 'kind:', pub?.kind, 'from:', p?.identity);
       });
 
