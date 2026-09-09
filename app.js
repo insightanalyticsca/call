@@ -16,6 +16,9 @@
  * Default users: admin/admin, guest/guest  (change after first login)
  * ============================================================ */
 
+/* ---------- Version ---------- */
+const APP_VERSION = 'lk12';
+
 /* ---------- Path / config ---------- */
 const BASE_PATH = (function detectBase() {
   // GitHub Pages serves this at /call/ — derive from the script src so
@@ -877,6 +880,19 @@ async function joinPeerRoom(room) {
   };
 
   LK.onPeerStream = (stream, peerId) => {
+    // lk12: Only display remote video when a call is active.
+    // A "call is active" means either:
+    //   - we initiated a call (state._callingPeer is set), OR
+    //   - we already accepted an incoming call (state.remoteStreams has entries),
+    //     OR
+    //   - we have an active local stream being published (our camera is on for a call)
+    // This prevents video from appearing just because both users joined the room.
+    const callActive = !!state._callingPeer || state.remoteStreams.size > 0 ||
+                       (state.localStream && state._room && state.localStream.getTracks().some(t => t.readyState === 'live'));
+    if (!callActive) {
+      console.log('[lk12] onPeerStream: ignoring remote track — no active call');
+      return;
+    }
     // LiveKit sends tracks one at a time — merge into existing stream
     let existing = state.remoteStreams.get(peerId);
     if (existing) {
@@ -2658,6 +2674,10 @@ function bind() {
 
 async function init() {
   renderIcons(document);
+  // Show version in UI + console so users can verify they're on the latest
+  const vs = $('#versionStatus');
+  if (vs) vs.textContent = `v: ${APP_VERSION}`;
+  console.log(`[Семейная связь] version ${APP_VERSION}`);
   bind();
   // Restore active tab from previous session (default to 'calls')
   const savedTab = (function() {
